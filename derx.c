@@ -213,18 +213,39 @@ static void print_hdr(const Hdr *h, int depth) {
 
 /* ----------------------------------------------------------------- parse */
 
-static void cmd_parse(const uint8_t *b, size_t n) {
-	size_t i = 0;
-	/* A file may hold several top-level elements; openssl walks them all
-	 * and errors if the last one is short, so we do the same. */
-	while (i < n) {
+/*
+ * 128 is openssl's ASN1_PARSE_MAXDEPTH, confirmed by experiment rather than
+ * assumed: a chain of N nested SEQUENCEs is accepted by asn1parse up to and
+ * including a printed depth of 128 and prints "BAD RECURSION DEPTH" with exit
+ * 1 at 129. Matching the number exactly keeps the accept/reject boundary the
+ * oracle's rather than ours, and a limit has to exist regardless -- walk()
+ * recurses, each level of nesting costs two input bytes, and a 1MB file of
+ * "\x30\x02" repeated would otherwise be a stack overflow instead of a
+ * diagnostic.
+ */
+#define MAXDEPTH 128
+
+static void walk(const uint8_t *b, size_t beg, size_t end, int depth) {
+	size_t i = beg;
+	/* A file may hold several top-level elements, and a constructed
+	 * element holds a run of them; openssl walks both the same way and
+	 * errors if the last one is short, so one loop serves both. */
+	while (i < end) {
 		Hdr h;
-		hdr(b, n, i, &h);
-		print_hdr(&h, 0);
+		hdr(b, end, i, &h);
+		print_hdr(&h, depth);
 		putchar('\n');
+		if (h.cons) {
+			if (depth >= MAXDEPTH)
+				die("nesting deeper than %d at offset %zu",
+				    MAXDEPTH, h.off);
+			walk(b, h.off + h.hl, h.off + h.hl + h.len, depth + 1);
+		}
 		i = h.off + h.hl + h.len;
 	}
 }
+
+static void cmd_parse(const uint8_t *b, size_t n) { walk(b, 0, n, 0); }
 
 /* ------------------------------------------------------------------- main */
 
