@@ -211,6 +211,199 @@ static void print_hdr(const Hdr *h, int depth) {
 	       depth + 1, "", tagname(h, scratch, sizeof scratch));
 }
 
+/* -------------------------------------------------------------------- OIDs */
+
+/*
+ * The names openssl prints for the OIDs this project meets. Three columns:
+ * the dotted form, the long name asn1parse prints for an OBJECT, and the
+ * name X509_NAME_print_ex prints for a relative distinguished name under
+ * -nameopt RFC2253, which is openssl's short name where it has one and the
+ * long name where it does not.
+ *
+ * This table is data I typed, which makes it the weakest thing in the
+ * program -- so it is also the most thoroughly checked. Every entry is
+ * verified by diff: get a dotted value wrong and derx prints digits where
+ * asn1parse prints a name, which fails on the first certificate that carries
+ * it. The RDN column is verified the same way against `openssl x509 -nameopt
+ * RFC2253 -subject`. The rows came from asking openssl, not from memory: a
+ * certificate was generated carrying all 24 attribute types and the names
+ * read back out of its own output.
+ *
+ * An OID absent from the table prints in dotted form, which is also what
+ * openssl does for an OID it does not know -- so the two agree there as well,
+ * and 1.3.6.1.4.1.311.21.1 in the corpus is a live example of that path.
+ * The failure that cannot happen silently is an OID openssl names and we do
+ * not: that is a diff, every time, on every certificate containing it.
+ */
+static const struct { const char *dotted, *ln, *rdn; } oidtab[] = {
+	/* X.520 attribute types, in the order openssl printed them back */
+	{ "2.5.4.3",  "commonName",             "CN" },
+	{ "2.5.4.10", "organizationName",       "O" },
+	{ "2.5.4.11", "organizationalUnitName", "OU" },
+	{ "2.5.4.6",  "countryName",            "C" },
+	{ "2.5.4.7",  "localityName",           "L" },
+	{ "2.5.4.8",  "stateOrProvinceName",    "ST" },
+	{ "2.5.4.9",  "streetAddress",          "street" },
+	{ "2.5.4.17", "postalCode",             "postalCode" },
+	{ "2.5.4.12", "title",                  "title" },
+	{ "2.5.4.4",  "surname",                "SN" },
+	{ "2.5.4.42", "givenName",              "GN" },
+	{ "2.5.4.43", "initials",               "initials" },
+	{ "2.5.4.15", "businessCategory",       "businessCategory" },
+	{ "2.5.4.5",  "serialNumber",           "serialNumber" },
+	{ "2.5.4.46", "dnQualifier",            "dnQualifier" },
+	{ "2.5.4.65", "pseudonym",              "pseudonym" },
+	{ "2.5.4.97", "organizationIdentifier", "organizationIdentifier" },
+	{ "2.5.4.13", "description",            "description" },
+	{ "2.5.4.41", "name",                   "name" },
+	{ "2.5.4.44", "generationQualifier",    "generationQualifier" },
+	{ "2.5.4.45", "x500UniqueIdentifier",   "x500UniqueIdentifier" },
+	{ "1.2.840.113549.1.9.1",        "emailAddress",    "emailAddress" },
+	{ "0.9.2342.19200300.100.1.25",  "domainComponent", "DC" },
+	{ "0.9.2342.19200300.100.1.1",   "userId",          "UID" },
+
+	/* algorithms */
+	{ "1.2.840.113549.1.1.1",  "rsaEncryption",           NULL },
+	{ "1.2.840.113549.1.1.5",  "sha1WithRSAEncryption",   NULL },
+	{ "1.2.840.113549.1.1.10", "rsassaPss",               NULL },
+	{ "1.2.840.113549.1.1.11", "sha256WithRSAEncryption", NULL },
+	{ "1.2.840.113549.1.1.12", "sha384WithRSAEncryption", NULL },
+	{ "1.2.840.113549.1.1.13", "sha512WithRSAEncryption", NULL },
+	{ "1.2.840.10045.2.1",     "id-ecPublicKey",          NULL },
+	{ "1.2.840.10045.4.1",     "ecdsa-with-SHA1",         NULL },
+	{ "1.2.840.10045.4.3.2",   "ecdsa-with-SHA256",       NULL },
+	{ "1.2.840.10045.4.3.3",   "ecdsa-with-SHA384",       NULL },
+	{ "1.2.840.10045.4.3.4",   "ecdsa-with-SHA512",       NULL },
+	{ "1.2.840.10045.3.1.7",   "prime256v1",              NULL },
+	{ "1.3.132.0.34",          "secp384r1",               NULL },
+	{ "1.3.132.0.35",          "secp521r1",               NULL },
+	{ "1.3.101.112",           "ED25519",                 NULL },
+	{ "1.3.101.113",           "ED448",                   NULL },
+	{ "2.16.840.1.101.3.4.2.1", "sha256",                 NULL },
+	{ "2.16.840.1.101.3.4.2.2", "sha384",                 NULL },
+	{ "2.16.840.1.101.3.4.2.3", "sha512",                 NULL },
+
+	/* certificate extensions */
+	{ "2.5.29.9",  "X509v3 Subject Directory Attributes", NULL },
+	{ "2.5.29.14", "X509v3 Subject Key Identifier",       NULL },
+	{ "2.5.29.15", "X509v3 Key Usage",                    NULL },
+	{ "2.5.29.16", "X509v3 Private Key Usage Period",     NULL },
+	{ "2.5.29.17", "X509v3 Subject Alternative Name",     NULL },
+	{ "2.5.29.18", "X509v3 Issuer Alternative Name",      NULL },
+	{ "2.5.29.19", "X509v3 Basic Constraints",            NULL },
+	{ "2.5.29.30", "X509v3 Name Constraints",             NULL },
+	{ "2.5.29.31", "X509v3 CRL Distribution Points",      NULL },
+	{ "2.5.29.32", "X509v3 Certificate Policies",         NULL },
+	{ "2.5.29.33", "X509v3 Policy Mappings",              NULL },
+	{ "2.5.29.35", "X509v3 Authority Key Identifier",     NULL },
+	{ "2.5.29.36", "X509v3 Policy Constraints",           NULL },
+	{ "2.5.29.37", "X509v3 Extended Key Usage",           NULL },
+	{ "2.5.29.46", "X509v3 Freshest CRL",                 NULL },
+	{ "2.5.29.54", "X509v3 Inhibit Any Policy",           NULL },
+	{ "1.3.6.1.5.5.7.1.1", "Authority Information Access", NULL },
+	{ "2.16.840.1.113730.1.1", "Netscape Cert Type",      NULL },
+	{ "2.23.42.7.0",       "setCext-hashedRoot",          NULL },
+};
+#define NOID ((int)(sizeof oidtab / sizeof *oidtab))
+
+static const char *oid_ln(const char *dotted) {
+	for (int i = 0; i < NOID; i++)
+		if (strcmp(oidtab[i].dotted, dotted) == 0) return oidtab[i].ln;
+	return NULL;
+}
+
+/* shortcut: one fixed buffer for the dotted text and 128 decimal digits per
+ * arc, so an arc above about 2^425 or an OID beyond 127 arcs is refused by
+ * name instead of printed. openssl needs a BIGNUM to print either and no
+ * registry contains one; the upgrade path is a growable digit array and a
+ * growable output buffer, which is the same loop with realloc in it. */
+#define OIDTEXTMAX 512
+#define OIDARCDIGITS 128
+
+static void oid_append(char *out, size_t *len, const char *s) {
+	size_t n = strlen(s);
+	if (*len + n + 1 > OIDTEXTMAX) die("OID longer than %d characters", OIDTEXTMAX);
+	memcpy(out + *len, s, n + 1);
+	*len += n;
+}
+
+/*
+ * Decode the content of an OBJECT IDENTIFIER into dotted decimal.
+ *
+ * X.690 8.19: the arcs are base-128 with the high bit set on every byte but
+ * the last of each arc, and the first two arcs are packed into one number as
+ * 40*X + Y. The unpacking has a wart worth naming: X is capped at 2, so arc
+ * values of 80 and above all belong to X=2 and Y runs past 39 -- which is why
+ * 2.999 is a legal OID and encodes as the single arc 1079.
+ *
+ * Arcs are accumulated as decimal digits rather than into a uint64, because
+ * openssl prints arbitrarily wide arcs (it reaches for a BIGNUM) and
+ * 1.2.2361183241434822606848 is a legal OID that a 64-bit accumulator turns
+ * into a wrong answer rather than an error. Only the first arc goes through a
+ * uint64, because unpacking 40*X + Y needs arithmetic and an arc that wide in
+ * the first position does not exist.
+ */
+static void oid_text(const uint8_t *p, size_t n, char *out, size_t *outlen) {
+	if (n == 0) die("OBJECT IDENTIFIER of zero length");
+	if (p[n - 1] & 0x80) die("OBJECT IDENTIFIER ends mid-arc");
+	*outlen = 0;
+	out[0] = '\0';
+
+	size_t i = 0;
+	int first = 1;
+	while (i < n) {
+		size_t beg = i;
+		/* X.690 8.19.2: an arc's leading byte may not be 0x80, which
+		 * would pad the value with a zero septet. openssl rejects
+		 * this too, printing "BAD OBJECT". */
+		if (p[beg] == 0x80) die("non-minimal OID arc at content byte %zu", beg);
+		while (p[i] & 0x80) i++;   /* the final byte above guarantees a stop */
+		i++;
+
+		char buf[OIDARCDIGITS + 24];
+		if (first) {
+			uint64_t v = 0;
+			for (size_t j = beg; j < i; j++) {
+				if (v > (UINT64_MAX >> 7))
+					die("first OID arc wider than 64 bits");
+				v = (v << 7) | (p[j] & 0x7fu);
+			}
+			unsigned long x = v < 80 ? (unsigned long)(v / 40) : 2;
+			snprintf(buf, sizeof buf, "%lu.%llu", x,
+			         (unsigned long long)(v - 40 * x));
+			oid_append(out, outlen, buf);
+			first = 0;
+			continue;
+		}
+		/* Decimal long multiplication: value = value*128 + septet,
+		 * least significant digit first so a carry just extends the
+		 * array. */
+		unsigned char d[OIDARCDIGITS];
+		size_t nd = 1;
+		d[0] = 0;
+		for (size_t j = beg; j < i; j++) {
+			unsigned carry = p[j] & 0x7fu;
+			for (size_t k = 0; k < nd; k++) {
+				unsigned v = d[k] * 128u + carry;
+				d[k] = (unsigned char)(v % 10);
+				carry = v / 10;
+			}
+			while (carry) {
+				if (nd == sizeof d)
+					die("OID arc wider than %d decimal digits",
+					    OIDARCDIGITS);
+				d[nd++] = (unsigned char)(carry % 10);
+				carry /= 10;
+			}
+		}
+		buf[0] = '.';
+		size_t w = 1;
+		for (size_t k = nd; k-- > 0;) buf[w++] = (char)('0' + d[k]);
+		buf[w] = '\0';
+		oid_append(out, outlen, buf);
+	}
+}
+
 /* ------------------------------------------------------------ values */
 
 /*
@@ -308,6 +501,14 @@ static void print_value(const uint8_t *b, const Hdr *h) {
 		putchar(':');
 		print_int(p, n);
 		return;
+	case 6: {
+		char txt[OIDTEXTMAX];
+		size_t len;
+		oid_text(p, n, txt, &len);
+		const char *ln = oid_ln(txt);
+		printf(":%s", ln ? ln : txt);
+		return;
+	}
 	case 4:
 		/* An octet string holds bytes, and openssl guesses: if they
 		 * all look like text it shows them as text, otherwise as hex
