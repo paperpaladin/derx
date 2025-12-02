@@ -156,6 +156,38 @@ static void hdr(const uint8_t *b, size_t end, size_t off, Hdr *h) {
 		 * form, so there is exactly one encoding of each length. */
 		if (len < 0x80) die("non-minimal length at %zu: short form required", off);
 	}
+	/*
+	 * X.690 10.2: where a type's value is primitive, DER requires the
+	 * primitive form. BER's alternative is a constructed string, split
+	 * into segments -- so "hello" can travel as one OCTET STRING or as
+	 * five, and a reader that accepts both has two encodings for one
+	 * value, which is the exact property DER exists to remove. The three
+	 * universal tags that are SEQUENCE types go the other way and may
+	 * only be constructed.
+	 *
+	 * Tags 11, 13, 14, 15 and 29 are classified neither way on purpose:
+	 * openssl has no name for them, so the oracle has no opinion about
+	 * them and neither do we.
+	 */
+	if (h->cls == CLS_UNIV && h->tag <= 30) {
+		static const uint32_t prim_only =
+			(1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) |
+			(1u << 5) | (1u << 6) | (1u << 7) | (1u << 9) |
+			(1u << 10) | (1u << 12) | (1u << 18) | (1u << 19) |
+			(1u << 20) | (1u << 21) | (1u << 22) | (1u << 23) |
+			(1u << 24) | (1u << 25) | (1u << 26) | (1u << 27) |
+			(1u << 28) | (1u << 30);
+		static const uint32_t cons_only =
+			(1u << 8) | (1u << 16) | (1u << 17);
+		uint32_t bit = 1u << h->tag;
+		if (h->cons && (prim_only & bit))
+			die("constructed universal tag %u at %zu: DER requires "
+			    "the primitive form", h->tag, off);
+		if (!h->cons && (cons_only & bit))
+			die("primitive universal tag %u at %zu: DER requires "
+			    "the constructed form", h->tag, off);
+	}
+
 	h->hl = i - off;
 	h->len = len;
 	if (end - i < len)
@@ -567,7 +599,13 @@ static void walk(const uint8_t *b, size_t beg, size_t end, int depth) {
 	}
 }
 
-static void cmd_parse(const uint8_t *b, size_t n) { walk(b, 0, n, 0); }
+static void cmd_parse(const uint8_t *b, size_t n) {
+	/* Nothing is not a DER element. openssl says "offset out of range"
+	 * and exits 1 here, and an empty file silently succeeding is how a
+	 * suite ends up asserting against no output at all. */
+	if (n == 0) die("empty input: no DER element");
+	walk(b, 0, n, 0);
+}
 
 /* ------------------------------------------------------------------- main */
 
