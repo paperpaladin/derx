@@ -333,6 +333,16 @@ static const struct { const char *dotted, *ln, *rdn; } oidtab[] = {
 	{ "2.5.29.46", "X509v3 Freshest CRL",                 NULL },
 	{ "2.5.29.54", "X509v3 Inhibit Any Policy",           NULL },
 	{ "1.3.6.1.5.5.7.1.1", "Authority Information Access", NULL },
+
+	/* extended key usage purposes, used by `derx cert` */
+	{ "1.3.6.1.5.5.7.3.1", "TLS Web Server Authentication", NULL },
+	{ "1.3.6.1.5.5.7.3.2", "TLS Web Client Authentication", NULL },
+	{ "1.3.6.1.5.5.7.3.3", "Code Signing",                  NULL },
+	{ "1.3.6.1.5.5.7.3.4", "E-mail Protection",             NULL },
+	{ "1.3.6.1.5.5.7.3.8", "Time Stamping",                 NULL },
+	{ "1.3.6.1.5.5.7.3.9", "OCSP Signing",                  NULL },
+	{ "2.5.29.37.0",       "Any Extended Key Usage",        NULL },
+
 	{ "2.16.840.1.113730.1.1", "Netscape Cert Type",      NULL },
 	{ "2.23.42.7.0",       "setCext-hashedRoot",          NULL },
 };
@@ -341,6 +351,14 @@ static const struct { const char *dotted, *ln, *rdn; } oidtab[] = {
 static const char *oid_ln(const char *dotted) {
 	for (int i = 0; i < NOID; i++)
 		if (strcmp(oidtab[i].dotted, dotted) == 0) return oidtab[i].ln;
+	return NULL;
+}
+
+/* openssl's short name where it has one, long name where it does not, NULL
+ * for an OID that is not an attribute type we know. */
+static const char *oid_rdn(const char *dotted) {
+	for (int i = 0; i < NOID; i++)
+		if (strcmp(oidtab[i].dotted, dotted) == 0) return oidtab[i].rdn;
 	return NULL;
 }
 
@@ -607,6 +625,669 @@ static void cmd_parse(const uint8_t *b, size_t n) {
 	walk(b, 0, n, 0);
 }
 
+/* ======================================================== X.509 (RFC 5280) */
+
+/*
+ * A cursor over one element's content. Everything below walks the certificate
+ * with these three calls and never indexes the buffer directly, so the bound
+ * that hdr() enforces -- the end of the enclosing element -- is the only
+ * bound there is.
+ */
+typedef struct { const uint8_t *b; size_t i, end; } Rd;
+
+static int rd_more(const Rd *r) { return r->i < r->end; }
+
+static Hdr rd_peek(const Rd *r, const char *what) {
+	if (!rd_more(r)) die("%s: expected another element, found none", what);
+	Hdr h;
+	hdr(r->b, r->end, r->i, &h);
+	return h;
+}
+static Hdr rd_next(Rd *r, const char *what) {
+	Hdr h = rd_peek(r, what);
+	r->i = h.off + h.hl + h.len;
+	return h;
+}
+static Rd rd_in(const Rd *r, const Hdr *h) {
+	Rd s;
+	s.b = r->b;
+	s.i = h->off + h->hl;
+	s.end = s.i + h->len;
+	return s;
+}
+static void rd_end(const Rd *r, const char *what) {
+	if (rd_more(r)) die("%s: %zu unexpected trailing bytes at %zu",
+	                    what, r->end - r->i, r->i);
+}
+static const uint8_t *content(const Hdr *h, const uint8_t *b) {
+	return b + h->off + h->hl;
+}
+
+static void expect(const Hdr *h, unsigned cls, unsigned tag, int cons,
+                   const char *what) {
+	if (h->cls != cls || h->tag != tag || h->cons != cons)
+		die("%s: expected class %u tag %u %s at %zu, found class %u "
+		    "tag %u %s", what, cls, tag, cons ? "constructed" : "primitive",
+		    h->off, h->cls, h->tag, h->cons ? "constructed" : "primitive");
+}
+
+/* A small non-negative INTEGER: version numbers, path lengths. */
+static unsigned long small_int(const Hdr *h, const uint8_t *b) {
+	expect(h, CLS_UNIV, 2, 0, "integer");
+	const uint8_t *p = content(h, b);
+	if (h->len == 0) die("INTEGER of zero length");
+	if (p[0] & 0x80) die("negative INTEGER where a count was expected");
+	if (h->len > 5 || (h->len == 5 && p[0] != 0))
+		die("INTEGER too large for a count at %zu", h->off);
+	unsigned long v = 0;
+	for (size_t i = 0; i < h->len; i++) v = (v << 8) | p[i];
+	return v;
+}
+
+/* The dotted form of an OBJECT, into caller-supplied storage. */
+static const char *oid_of(const Hdr *h, const uint8_t *b, char *txt) {
+	expect(h, CLS_UNIV, 6, 0, "object identifier");
+	size_t len;
+	oid_text(content(h, b), h->len, txt, &len);
+	return txt;
+}
+
+/* ------------------------------------------------------------ directory strings */
+
+/*
+ * One character of a directory string as a Unicode code point, advancing *i.
+ *
+ * openssl converts every string type to UTF-8 before escaping it, and what it
+ * converts *with* is worth naming because it is not what the standards say:
+ * the one-byte-per-character types all go through MBSTRING_ASC, which treats
+ * each byte as a code point. So a T61String byte 0xC1 becomes U+00C1, Latin-1
+ * capital A with acute, and not T.61's combining acute accent. Checked against
+ * the oracle with a hand-built certificate, because openssl's own generator
+ * will not emit one. See t/run.sh.
+ */
+static unsigned long str_cp(const uint8_t *p, size_t n, size_t *i, unsigned tag) {
+	size_t k = *i;
+	unsigned long c;
+	switch (tag) {
+	case 30: /* BMPString: UCS-2, big endian */
+		if (n - k < 2) die("BMPString of odd length");
+		*i = k + 2;
+		c = ((unsigned long)p[k] << 8) | p[k + 1];
+		if (c >= 0xd800 && c <= 0xdfff)
+			die("BMPString containing a UTF-16 surrogate");
+		return c;
+	case 28: /* UniversalString: UCS-4, big endian */
+		if (n - k < 4) die("UniversalString length is not a multiple of 4");
+		*i = k + 4;
+		c = ((unsigned long)p[k] << 24) | ((unsigned long)p[k + 1] << 16)
+		  | ((unsigned long)p[k + 2] << 8) | p[k + 3];
+		if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff))
+			die("UniversalString code point U+%lX is not a character", c);
+		return c;
+	case 12: { /* UTF8String: decoded and re-encoded, so it must be valid */
+		unsigned need;
+		unsigned long lo;
+		if (p[k] < 0x80)                      { *i = k + 1; return p[k]; }
+		else if ((p[k] & 0xe0) == 0xc0) { need = 1; c = p[k] & 0x1fu; lo = 0x80; }
+		else if ((p[k] & 0xf0) == 0xe0) { need = 2; c = p[k] & 0x0fu; lo = 0x800; }
+		else if ((p[k] & 0xf8) == 0xf0) { need = 3; c = p[k] & 0x07u; lo = 0x10000; }
+		else die("UTF8String: byte %02X is not the start of a character", p[k]);
+		if (n - k < need + 1) die("UTF8String: truncated character");
+		for (unsigned j = 1; j <= need; j++) {
+			if ((p[k + j] & 0xc0) != 0x80)
+				die("UTF8String: byte %02X is not a continuation", p[k + j]);
+			c = (c << 6) | (p[k + j] & 0x3fu);
+		}
+		/* An overlong encoding is a second spelling of a character
+		 * that already has one, and historically the way past a filter
+		 * that only checked the short spelling. openssl's decoder
+		 * refuses these and so does the whole certificate. */
+		if (c < lo) die("UTF8String: overlong encoding of U+%lX", c);
+		if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff))
+			die("UTF8String: U+%lX is not a character", c);
+		*i = k + need + 1;
+		return c;
+	}
+	default: /* PrintableString, T61String, IA5String, NumericString */
+		*i = k + 1;
+		return p[k];
+	}
+}
+
+static int renderable_string(unsigned tag) {
+	switch (tag) {
+	case 12: case 18: case 19: case 20: case 22: case 28: case 30: return 1;
+	default: return 0;
+	}
+}
+
+/*
+ * RFC 2253 section 2.4 escaping, as openssl implements it under
+ * -nameopt RFC2253. Every rule here was read off the oracle's output rather
+ * than off the RFC, because the two do not quite agree and the oracle is what
+ * the test compares against:
+ *
+ *   , + " \ < > ;       always backslash-escaped
+ *   # and space         backslash-escaped only as the first character
+ *   space               backslash-escaped as the last character
+ *   below 0x20, or 0x7F escaped as \XX, uppercase, two digits
+ *   above 0x7F          the UTF-8 bytes, each as \XX
+ *
+ * and nothing else: =, *, /, and a non-leading # all travel unescaped.
+ */
+static void put_dstring(const uint8_t *p, size_t n, unsigned tag) {
+	size_t i = 0, idx = 0;
+	while (i < n) {
+		unsigned long c = str_cp(p, n, &i, tag);
+		int first = idx++ == 0, last = i == n;
+		if (c >= 0x80) {
+			uint8_t u[4];
+			size_t w;
+			if (c < 0x800) {
+				u[0] = (uint8_t)(0xc0 | (c >> 6));
+				u[1] = (uint8_t)(0x80 | (c & 0x3f));
+				w = 2;
+			} else if (c < 0x10000) {
+				u[0] = (uint8_t)(0xe0 | (c >> 12));
+				u[1] = (uint8_t)(0x80 | ((c >> 6) & 0x3f));
+				u[2] = (uint8_t)(0x80 | (c & 0x3f));
+				w = 3;
+			} else {
+				u[0] = (uint8_t)(0xf0 | (c >> 18));
+				u[1] = (uint8_t)(0x80 | ((c >> 12) & 0x3f));
+				u[2] = (uint8_t)(0x80 | ((c >> 6) & 0x3f));
+				u[3] = (uint8_t)(0x80 | (c & 0x3f));
+				w = 4;
+			}
+			for (size_t j = 0; j < w; j++) printf("\\%02X", u[j]);
+			continue;
+		}
+		int ch = (int)c;
+		if (ch < 0x20 || ch == 0x7f) { printf("\\%02X", ch); continue; }
+		if (strchr(",+\"\\<>;", ch) != NULL
+		    || (first && (ch == '#' || ch == ' '))
+		    || (last && ch == ' '))
+			putchar('\\');
+		putchar(ch);
+	}
+}
+
+/* ---------------------------------------------------------------- names */
+
+/* shortcut: a flat array, so a distinguished name with more than 256
+ * attributes is refused by name rather than printed. RFC 5280 puts no bound
+ * on it; the certificates on this machine use at most five. Growing it means
+ * a realloc, or two passes over the same bytes to count first. */
+#define MAXATV 256
+typedef struct { int set; Hdr type, val; } Atv;
+
+/*
+ * Name ::= RDNSequence ::= SEQUENCE OF SET OF AttributeTypeAndValue.
+ *
+ * Printed the way -nameopt RFC2253 prints it, which is reverse order
+ * throughout: the attributes are flattened in encoding order and then emitted
+ * back to front, joined by "+" while they stay inside one SET and by ","
+ * when the SET changes. So a subject encoded C, O, CN prints as CN=...,O=...,
+ * C=..., and a two-attribute SET encoded CN then O prints as O=b+CN=a.
+ *
+ * An attribute type the table does not know prints as the dotted OID with
+ * the value dumped as "#" plus the hex of the whole DER element, header
+ * included -- openssl's XN_FLAG_DUMP_UNKNOWN_FIELDS. The same dump is used
+ * for a known type whose value is not one of the seven string types openssl
+ * will convert.
+ */
+static void print_name(const Rd *outer, const Hdr *nh, const char *what) {
+	Atv a[MAXATV];
+	int na = 0, set = 0;
+	Rd seqr = rd_in(outer, nh);
+	expect(nh, CLS_UNIV, 16, 1, what);
+	while (rd_more(&seqr)) {
+		Hdr rdn = rd_next(&seqr, what);
+		expect(&rdn, CLS_UNIV, 17, 1, "relative distinguished name");
+		Rd setr = rd_in(&seqr, &rdn);
+		if (!rd_more(&setr)) die("%s: empty relative distinguished name", what);
+		while (rd_more(&setr)) {
+			Hdr atv = rd_next(&setr, "attribute");
+			expect(&atv, CLS_UNIV, 16, 1, "attribute");
+			Rd ar = rd_in(&setr, &atv);
+			if (na == MAXATV) die("%s: more than %d attributes", what, MAXATV);
+			a[na].set = set;
+			a[na].type = rd_next(&ar, "attribute type");
+			a[na].val = rd_next(&ar, "attribute value");
+			rd_end(&ar, "attribute");
+			na++;
+		}
+		set++;
+	}
+	if (na == 0) die("%s: empty name", what);
+
+	for (int i = na - 1; i >= 0; i--) {
+		char txt[OIDTEXTMAX];
+		const char *dotted = oid_of(&a[i].type, outer->b, txt);
+		const char *sn = oid_rdn(dotted);
+		const Hdr *v = &a[i].val;
+		/* openssl's X509_NAME template accepts a handful of value
+		 * types beyond the string ones -- BIT STRING and SEQUENCE are
+		 * in its ASN1_PRINTABLE mask -- and refuses the rest outright,
+		 * declining to build a name at all. derx takes the narrower
+		 * line and refuses anything it cannot render as text, so the
+		 * only values it dumps as hex are string values under an
+		 * attribute type it has no name for. */
+		if (v->cls != CLS_UNIV || v->cons || !renderable_string(v->tag))
+			die("%s: attribute value at %zu is not a string type "
+			    "derx renders", what, v->off);
+		if (sn != NULL) {
+			printf("%s=", sn);
+			put_dstring(content(v, outer->b), v->len, v->tag);
+		} else {
+			printf("%s=#", dotted);
+			put_hex(outer->b + v->off, v->hl + v->len);
+		}
+		if (i > 0) putchar(a[i - 1].set == a[i].set ? '+' : ',');
+	}
+}
+
+/* ----------------------------------------------------------------- time */
+
+/*
+ * UTCTime is YYMMDDHHMMSSZ and GeneralizedTime is YYYYMMDDHHMMSSZ. RFC 5280
+ * 4.1.2.5 requires exactly those two forms -- seconds present, always Zulu --
+ * and forbids the fractional-second and offset variants that X.680 allows, so
+ * anything else is refused rather than guessed at.
+ *
+ * The two-digit year rule is also RFC 5280's, not X.680's: 50 and above is
+ * 19xx, below 50 is 20xx. Printed in openssl's ASN1_TIME_print layout, where
+ * the day is right-aligned in two columns -- "Oct  9", two spaces.
+ */
+static void print_time(const Hdr *h, const uint8_t *b, const char *what) {
+	static const char *mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+	const uint8_t *p = content(h, b);
+	size_t ndigit;
+	int year;
+	if (h->cls == CLS_UNIV && h->tag == 23 && h->len == 13) {
+		ndigit = 12;
+		year = -1;
+	} else if (h->cls == CLS_UNIV && h->tag == 24 && h->len == 15) {
+		ndigit = 14;
+		year = 0;
+	} else {
+		die("%s: expected a 13-byte UTCTime or a 15-byte GeneralizedTime "
+		    "at %zu", what, h->off);
+		return;
+	}
+	for (size_t i = 0; i < ndigit; i++)
+		if (p[i] < '0' || p[i] > '9')
+			die("%s: non-digit in the timestamp at %zu", what, h->off);
+	if (p[ndigit] != 'Z')
+		die("%s: timestamp is not UTC (no trailing Z) at %zu", what, h->off);
+	int d[14];
+	for (size_t i = 0; i < ndigit; i++) d[i] = p[i] - '0';
+	size_t o;
+	if (year < 0) {
+		year = d[0] * 10 + d[1];
+		year += year >= 50 ? 1900 : 2000;
+		o = 2;
+	} else {
+		year = d[0] * 1000 + d[1] * 100 + d[2] * 10 + d[3];
+		o = 4;
+	}
+	int mo = d[o] * 10 + d[o + 1];
+	int da = d[o + 2] * 10 + d[o + 3];
+	int hh = d[o + 4] * 10 + d[o + 5];
+	int mi = d[o + 6] * 10 + d[o + 7];
+	int ss = d[o + 8] * 10 + d[o + 9];
+	if (mo < 1 || mo > 12 || da < 1 || da > 31 || hh > 23 || mi > 59 || ss > 60)
+		die("%s: timestamp is not a date at %zu", what, h->off);
+	printf("%s %2d %02d:%02d:%02d %d GMT", mon[mo - 1], da, hh, mi, ss, year);
+}
+
+/* ------------------------------------------------------------ public key */
+
+/* Bit length of a positive INTEGER's magnitude, which is what openssl means
+ * by "Public-Key: (2048 bit)" for RSA. The leading 0x00 that keeps a modulus
+ * positive is not part of the magnitude. */
+static unsigned long int_bits(const Hdr *h, const uint8_t *b) {
+	const uint8_t *p = content(h, b);
+	size_t n = h->len, s = 0;
+	while (s < n && p[s] == 0) s++;
+	if (s == n) return 0;
+	unsigned long bits = (unsigned long)(n - s - 1) * 8;
+	unsigned top = p[s];
+	while (top) { bits++; top >>= 1; }
+	return bits;
+}
+
+static const struct { const char *oid; unsigned bits; } curvebits[] = {
+	{ "1.2.840.10045.3.1.7", 256 },  /* prime256v1 */
+	{ "1.3.132.0.34",        384 },  /* secp384r1 */
+	{ "1.3.132.0.35",        521 },  /* secp521r1 */
+};
+
+/* ------------------------------------------------------------ extensions */
+
+static void put_colon_hex(const uint8_t *p, size_t n) {
+	for (size_t i = 0; i < n; i++) printf("%s%02X", i ? ":" : "", p[i]);
+}
+
+static const char *ku_name[9] = { "Digital Signature", "Non Repudiation",
+	"Key Encipherment", "Data Encipherment", "Key Agreement",
+	"Certificate Sign", "CRL Sign", "Encipher Only", "Decipher Only" };
+
+/* Returns 0 if this extension is one derx does not decode, in which case
+ * nothing was printed. */
+static int print_ext_value(const char *dotted, const Rd *r, const Hdr *oct) {
+	const uint8_t *b = r->b;
+	Rd v = rd_in(r, oct);
+
+	if (strcmp(dotted, "2.5.29.19") == 0) {        /* Basic Constraints */
+		Hdr s = rd_next(&v, "basicConstraints");
+		expect(&s, CLS_UNIV, 16, 1, "basicConstraints");
+		rd_end(&v, "basicConstraints");
+		Rd i = rd_in(&v, &s);
+		int ca = 0;
+		unsigned long plen = 0;
+		int has_plen = 0;
+		if (rd_more(&i)) {
+			Hdr h = rd_peek(&i, "basicConstraints");
+			if (h.cls == CLS_UNIV && h.tag == 1) {
+				rd_next(&i, "cA");
+				if (h.len != 1) die("cA is not one byte");
+				ca = content(&h, b)[0] != 0;
+			}
+		}
+		if (rd_more(&i)) {
+			Hdr h = rd_next(&i, "pathLenConstraint");
+			plen = small_int(&h, b);
+			has_plen = 1;
+		}
+		rd_end(&i, "basicConstraints");
+		printf("CA:%s", ca ? "TRUE" : "FALSE");
+		if (has_plen) printf(", pathlen:%lu", plen);
+		return 1;
+	}
+	if (strcmp(dotted, "2.5.29.15") == 0) {        /* Key Usage */
+		Hdr s = rd_next(&v, "keyUsage");
+		expect(&s, CLS_UNIV, 3, 0, "keyUsage");
+		rd_end(&v, "keyUsage");
+		if (s.len == 0) die("keyUsage BIT STRING has no unused-bits octet");
+		const uint8_t *p = content(&s, b);
+		unsigned unused = p[0];
+		if (unused > 7) die("keyUsage declares %u unused bits", unused);
+		size_t nbit = (s.len - 1) * 8 - unused;
+		int printed = 0;
+		for (size_t i = 0; i < nbit && i < 9; i++)
+			if (p[1 + i / 8] & (0x80u >> (i % 8))) {
+				printf("%s%s", printed ? ", " : "", ku_name[i]);
+				printed = 1;
+			}
+		return 1;
+	}
+	if (strcmp(dotted, "2.5.29.37") == 0) {        /* Extended Key Usage */
+		Hdr s = rd_next(&v, "extendedKeyUsage");
+		expect(&s, CLS_UNIV, 16, 1, "extendedKeyUsage");
+		rd_end(&v, "extendedKeyUsage");
+		Rd i = rd_in(&v, &s);
+		int printed = 0;
+		while (rd_more(&i)) {
+			Hdr h = rd_next(&i, "key purpose");
+			char txt[OIDTEXTMAX];
+			const char *d = oid_of(&h, b, txt);
+			const char *ln = oid_ln(d);
+			printf("%s%s", printed ? ", " : "", ln ? ln : d);
+			printed = 1;
+		}
+		return 1;
+	}
+	if (strcmp(dotted, "2.5.29.14") == 0) {        /* Subject Key Identifier */
+		Hdr s = rd_next(&v, "subjectKeyIdentifier");
+		expect(&s, CLS_UNIV, 4, 0, "subjectKeyIdentifier");
+		rd_end(&v, "subjectKeyIdentifier");
+		put_colon_hex(content(&s, b), s.len);
+		return 1;
+	}
+	if (strcmp(dotted, "2.5.29.35") == 0) {        /* Authority Key Identifier */
+		Hdr s = rd_next(&v, "authorityKeyIdentifier");
+		expect(&s, CLS_UNIV, 16, 1, "authorityKeyIdentifier");
+		rd_end(&v, "authorityKeyIdentifier");
+		Rd i = rd_in(&v, &s);
+		if (!rd_more(&i)) return 0;
+		Hdr h = rd_next(&i, "keyIdentifier");
+		/* Only the keyIdentifier-alone form, which is what openssl
+		 * prints as bare hex. With an authorityCertIssuer or serial
+		 * present openssl prints three labelled lines instead, and
+		 * this one-line-per-extension format has nowhere to put them;
+		 * 5 of the 150 certificates on this machine are that shape. */
+		if (rd_more(&i) || h.cls != CLS_CONT || h.tag != 0 || h.cons) return 0;
+		put_colon_hex(content(&h, b), h.len);
+		return 1;
+	}
+	if (strcmp(dotted, "2.5.29.17") == 0) {        /* Subject Alternative Name */
+		Hdr s = rd_next(&v, "subjectAltName");
+		expect(&s, CLS_UNIV, 16, 1, "subjectAltName");
+		rd_end(&v, "subjectAltName");
+		Rd i = rd_in(&v, &s);
+		/* One unsupported GeneralName kind makes the whole value
+		 * undecoded rather than a partial list, because a partial list
+		 * of the names a certificate is valid for is worse than none. */
+		Rd scan = i;
+		while (rd_more(&scan)) {
+			Hdr h = rd_next(&scan, "general name");
+			if (h.cls != CLS_CONT) return 0;
+			if (h.tag == 1 || h.tag == 2 || h.tag == 6) {
+				if (h.cons) return 0;
+			} else if (h.tag == 7) {
+				if (h.cons || (h.len != 4 && h.len != 16)) return 0;
+			} else {
+				return 0;
+			}
+		}
+		int printed = 0;
+		while (rd_more(&i)) {
+			Hdr h = rd_next(&i, "general name");
+			const uint8_t *p = content(&h, b);
+			if (printed) fputs(", ", stdout);
+			printed = 1;
+			switch (h.tag) {
+			case 1: fputs("email:", stdout); fwrite(p, 1, h.len, stdout); break;
+			case 2: fputs("DNS:", stdout);   fwrite(p, 1, h.len, stdout); break;
+			case 6: fputs("URI:", stdout);   fwrite(p, 1, h.len, stdout); break;
+			default:
+				fputs("IP Address:", stdout);
+				if (h.len == 4)
+					printf("%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+				else
+					for (int g = 0; g < 8; g++)
+						printf("%s%X", g ? ":" : "",
+						       (p[2 * g] << 8) | p[2 * g + 1]);
+			}
+		}
+		return 1;
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------- derx cert */
+
+static void cmd_cert(const uint8_t *b, size_t n) {
+	if (n == 0) die("empty input: no certificate");
+	Rd file;
+	file.b = b;
+	file.i = 0;
+	file.end = n;
+	Hdr certh = rd_next(&file, "Certificate");
+	expect(&certh, CLS_UNIV, 16, 1, "Certificate");
+	rd_end(&file, "Certificate");
+	Rd cert = rd_in(&file, &certh);
+
+	Hdr tbsh = rd_next(&cert, "TBSCertificate");
+	expect(&tbsh, CLS_UNIV, 16, 1, "TBSCertificate");
+	Rd tbs = rd_in(&cert, &tbsh);
+
+	/* version [0] EXPLICIT INTEGER DEFAULT v1. Absent means v1, which is
+	 * the only field in the structure whose absence carries a value. */
+	unsigned long version = 1;
+	Hdr h = rd_peek(&tbs, "version");
+	if (h.cls == CLS_CONT && h.tag == 0 && h.cons) {
+		rd_next(&tbs, "version");
+		Rd vr = rd_in(&tbs, &h);
+		Hdr vi = rd_next(&vr, "version");
+		rd_end(&vr, "version");
+		version = small_int(&vi, b) + 1;
+	}
+	printf("version=%lu\n", version);
+
+	Hdr serial = rd_next(&tbs, "serialNumber");
+	expect(&serial, CLS_UNIV, 2, 0, "serialNumber");
+	fputs("serial=", stdout);
+	print_int(content(&serial, b), serial.len);
+	putchar('\n');
+
+	Hdr sigalg = rd_next(&tbs, "signature");
+	expect(&sigalg, CLS_UNIV, 16, 1, "signature");
+	{
+		Rd ar = rd_in(&tbs, &sigalg);
+		Hdr o = rd_next(&ar, "signature algorithm");
+		char txt[OIDTEXTMAX];
+		const char *d = oid_of(&o, b, txt);
+		const char *ln = oid_ln(d);
+		printf("sigalg=%s\n", ln ? ln : d);
+	}
+
+	Hdr issuer = rd_next(&tbs, "issuer");
+	fputs("issuer=", stdout);
+	print_name(&tbs, &issuer, "issuer");
+	putchar('\n');
+
+	Hdr val = rd_next(&tbs, "validity");
+	expect(&val, CLS_UNIV, 16, 1, "validity");
+	{
+		Rd vr = rd_in(&tbs, &val);
+		Hdr nb = rd_next(&vr, "notBefore");
+		Hdr na = rd_next(&vr, "notAfter");
+		rd_end(&vr, "validity");
+		fputs("notBefore=", stdout);
+		print_time(&nb, b, "notBefore");
+		fputs("\nnotAfter=", stdout);
+		print_time(&na, b, "notAfter");
+		putchar('\n');
+	}
+
+	Hdr subject = rd_next(&tbs, "subject");
+	fputs("subject=", stdout);
+	print_name(&tbs, &subject, "subject");
+	putchar('\n');
+
+	Hdr spki = rd_next(&tbs, "subjectPublicKeyInfo");
+	expect(&spki, CLS_UNIV, 16, 1, "subjectPublicKeyInfo");
+	{
+		Rd sr = rd_in(&tbs, &spki);
+		Hdr algh = rd_next(&sr, "public key algorithm");
+		expect(&algh, CLS_UNIV, 16, 1, "public key algorithm");
+		Hdr keyh = rd_next(&sr, "subjectPublicKey");
+		expect(&keyh, CLS_UNIV, 3, 0, "subjectPublicKey");
+		rd_end(&sr, "subjectPublicKeyInfo");
+
+		Rd ar = rd_in(&sr, &algh);
+		Hdr o = rd_next(&ar, "public key algorithm");
+		char txt[OIDTEXTMAX];
+		const char *d = oid_of(&o, b, txt);
+		const char *ln = oid_ln(d);
+		printf("keyalg=%s\n", ln ? ln : d);
+
+		/* A BIT STRING's first content octet counts the unused bits in
+		 * its last. For a key it is always zero, and if it is not then
+		 * the bytes below are not what they claim to be. */
+		if (keyh.len == 0) die("subjectPublicKey: empty BIT STRING");
+		if (content(&keyh, b)[0] != 0)
+			die("subjectPublicKey: %u unused bits, expected 0",
+			    content(&keyh, b)[0]);
+
+		if (strcmp(d, "1.2.840.113549.1.1.1") == 0) {
+			Rd kr;
+			kr.b = b;
+			kr.i = keyh.off + keyh.hl + 1;
+			kr.end = keyh.off + keyh.hl + keyh.len;
+			Hdr s = rd_next(&kr, "RSAPublicKey");
+			expect(&s, CLS_UNIV, 16, 1, "RSAPublicKey");
+			rd_end(&kr, "RSAPublicKey");
+			Rd ir = rd_in(&kr, &s);
+			Hdr mod = rd_next(&ir, "modulus");
+			expect(&mod, CLS_UNIV, 2, 0, "modulus");
+			printf("keybits=%lu\n", int_bits(&mod, b));
+		} else if (strcmp(d, "1.2.840.10045.2.1") == 0) {
+			Hdr par = rd_next(&ar, "EC parameters");
+			char ct[OIDTEXTMAX];
+			const char *cd = oid_of(&par, b, ct);
+			unsigned bits = 0;
+			for (size_t i = 0; i < sizeof curvebits / sizeof *curvebits; i++)
+				if (strcmp(curvebits[i].oid, cd) == 0)
+					bits = curvebits[i].bits;
+			if (bits) printf("keybits=%u\n", bits);
+			else fputs("keybits=-\n", stdout);
+		} else {
+			/* Ed25519 is the live example: openssl prints
+			 * "ED25519 Public-Key:" with no bit count, so there is
+			 * no number here for the oracle to agree with. */
+			fputs("keybits=-\n", stdout);
+		}
+	}
+
+	/* issuerUniqueID [1] and subjectUniqueID [2] are both IMPLICIT BIT
+	 * STRINGs from X.509 v2 that RFC 5280 tells conforming CAs not to
+	 * emit. Skipped rather than printed, and only after v2 or later. */
+	while (rd_more(&tbs)) {
+		Hdr t = rd_peek(&tbs, "TBSCertificate");
+		if (t.cls == CLS_CONT && (t.tag == 1 || t.tag == 2) && !t.cons) {
+			rd_next(&tbs, "uniqueID");
+			continue;
+		}
+		break;
+	}
+
+	if (rd_more(&tbs)) {
+		Hdr exts = rd_next(&tbs, "extensions");
+		if (exts.cls != CLS_CONT || exts.tag != 3 || !exts.cons)
+			die("extensions: expected [3] constructed at %zu", exts.off);
+		Rd er = rd_in(&tbs, &exts);
+		Hdr es = rd_next(&er, "extensions");
+		expect(&es, CLS_UNIV, 16, 1, "extensions");
+		rd_end(&er, "extensions");
+		Rd lr = rd_in(&er, &es);
+		while (rd_more(&lr)) {
+			Hdr e = rd_next(&lr, "extension");
+			expect(&e, CLS_UNIV, 16, 1, "extension");
+			Rd ir = rd_in(&lr, &e);
+			Hdr o = rd_next(&ir, "extnID");
+			char txt[OIDTEXTMAX];
+			const char *d = oid_of(&o, b, txt);
+			int crit = 0;
+			Hdr next = rd_next(&ir, "extension");
+			if (next.cls == CLS_UNIV && next.tag == 1) {
+				if (next.len != 1) die("critical flag is not one byte");
+				crit = content(&next, b)[0] != 0;
+				next = rd_next(&ir, "extnValue");
+			}
+			expect(&next, CLS_UNIV, 4, 0, "extnValue");
+			rd_end(&ir, "extension");
+			const char *ln = oid_ln(d);
+			printf("ext=%s:%s:", ln ? ln : d, crit ? "critical" : "-");
+			if (!print_ext_value(d, &ir, &next)) putchar('?');
+			putchar('\n');
+		}
+	}
+	rd_end(&tbs, "TBSCertificate");
+
+	/* The outer signatureAlgorithm and signatureValue are read only far
+	 * enough to confirm the structure; derx does no cryptography, so
+	 * neither one has a meaning it could print. */
+	Hdr outer = rd_next(&cert, "signatureAlgorithm");
+	expect(&outer, CLS_UNIV, 16, 1, "signatureAlgorithm");
+	Hdr sigval = rd_next(&cert, "signatureValue");
+	expect(&sigval, CLS_UNIV, 3, 0, "signatureValue");
+	rd_end(&cert, "Certificate");
+}
+
 /* ------------------------------------------------------------------- main */
 
 static void usage(void) {
@@ -620,6 +1301,7 @@ int main(int argc, char **argv) {
 	size_t n;
 	uint8_t *b = slurp(argv[2], &n);
 	if (strcmp(argv[1], "parse") == 0) cmd_parse(b, n);
+	else if (strcmp(argv[1], "cert") == 0) cmd_cert(b, n);
 	else usage();
 	if (fflush(stdout) != 0) die("write error");
 	free(b);
