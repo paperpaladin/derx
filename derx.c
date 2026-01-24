@@ -503,15 +503,21 @@ static void put_hex(const uint8_t *p, size_t n) {
  * prints -512 (FE 00) as "-0200", keeping the low zero byte, and FF 00 01 as
  * "-FFFF", dropping the high one.
  */
-static void print_int(const uint8_t *p, size_t n) {
+/* X.690 8.3.2: the first nine bits may not be all zero or all one, or the
+ * first octet is redundant. DER has one encoding per value and this is the
+ * rule that makes that true for integers; openssl accepts the redundant form,
+ * printing "BAD INTEGER" in asn1parse and quietly ignoring the padding
+ * everywhere else. Shared by every place an INTEGER's content is read, so the
+ * rule holds in `derx cert` exactly as it does in `derx parse` -- a reader
+ * that is strict in one subcommand and lax in the other is lax. */
+static void int_check(const uint8_t *p, size_t n) {
 	if (n == 0) die("INTEGER of zero length");
-	/* X.690 8.3.2: the first nine bits may not be all zero or all one, or
-	 * the first octet is redundant. DER has one encoding per value and
-	 * this is the rule that makes that true for integers; openssl accepts
-	 * the redundant form and prints "BAD INTEGER". */
 	if (n > 1 && ((p[0] == 0x00 && p[1] < 0x80) || (p[0] == 0xff && p[1] >= 0x80)))
 		die("non-minimal INTEGER: redundant leading byte %02X", p[0]);
+}
 
+static void print_int(const uint8_t *p, size_t n) {
+	int_check(p, n);
 	if (!(p[0] & 0x80)) {
 		size_t s = (n > 1 && p[0] == 0) ? 1 : 0;
 		put_hex(p + s, n - s);
@@ -675,7 +681,7 @@ static void expect(const Hdr *h, unsigned cls, unsigned tag, int cons,
 static unsigned long small_int(const Hdr *h, const uint8_t *b) {
 	expect(h, CLS_UNIV, 2, 0, "integer");
 	const uint8_t *p = content(h, b);
-	if (h->len == 0) die("INTEGER of zero length");
+	int_check(p, h->len);
 	if (p[0] & 0x80) die("negative INTEGER where a count was expected");
 	if (h->len > 5 || (h->len == 5 && p[0] != 0))
 		die("INTEGER too large for a count at %zu", h->off);
@@ -949,6 +955,7 @@ static void print_time(const Hdr *h, const uint8_t *b, const char *what) {
  * positive is not part of the magnitude. */
 static unsigned long int_bits(const Hdr *h, const uint8_t *b) {
 	const uint8_t *p = content(h, b);
+	int_check(p, h->len);
 	size_t n = h->len, s = 0;
 	while (s < n && p[s] == 0) s++;
 	if (s == n) return 0;
@@ -968,6 +975,25 @@ static const struct { const char *oid; unsigned bits; } curvebits[] = {
 
 static void put_colon_hex(const uint8_t *p, size_t n) {
 	for (size_t i = 0; i < n; i++) printf("%s%02X", i ? ":" : "", p[i]);
+}
+
+/*
+ * X.690 11.1: DER spells TRUE as a single 0xff octet. X.690 11.5: a component
+ * whose value equals its DEFAULT must be omitted. Both of the BOOLEANs in a
+ * certificate -- an extension's `critical` and basicConstraints' `cA` -- are
+ * DEFAULT FALSE, so an explicit FALSE is a second encoding of the absent case,
+ * which is the thing DER exists to rule out. openssl reads both forms.
+ *
+ * FALSE therefore cannot reach a caller, which is why this returns no value.
+ */
+static void bool_true_or_die(const Hdr *h, const uint8_t *b, const char *what) {
+	if (h->len != 1)
+		die("%s: BOOLEAN of length %zu, must be 1", what, h->len);
+	unsigned v = content(h, b)[0];
+	if (v == 0x00)
+		die("%s: DEFAULT FALSE encoded explicitly, which DER omits", what);
+	if (v != 0xff)
+		die("%s: BOOLEAN %02X, DER allows only 00 or FF", what, v);
 }
 
 static const char *ku_name[9] = { "Digital Signature", "Non Repudiation",
@@ -992,8 +1018,8 @@ static int print_ext_value(const char *dotted, const Rd *r, const Hdr *oct) {
 			Hdr h = rd_peek(&i, "basicConstraints");
 			if (h.cls == CLS_UNIV && h.tag == 1) {
 				rd_next(&i, "cA");
-				if (h.len != 1) die("cA is not one byte");
-				ca = content(&h, b)[0] != 0;
+				bool_true_or_die(&h, b, "cA");
+				ca = 1;
 			}
 		}
 		if (rd_more(&i)) {
@@ -1264,8 +1290,8 @@ static void cmd_cert(const uint8_t *b, size_t n) {
 			int crit = 0;
 			Hdr next = rd_next(&ir, "extension");
 			if (next.cls == CLS_UNIV && next.tag == 1) {
-				if (next.len != 1) die("critical flag is not one byte");
-				crit = content(&next, b)[0] != 0;
+				bool_true_or_die(&next, b, "extension critical flag");
+				crit = 1;
 				next = rd_next(&ir, "extnValue");
 			}
 			expect(&next, CLS_UNIV, 4, 0, "extnValue");

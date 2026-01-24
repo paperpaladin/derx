@@ -489,38 +489,90 @@ certfields 'cert fields: hand-built v1, unknown attribute OID, 16-bit key' \
 #
 # The 1.2.3.4 attribute stays in every one of these, so each case also
 # re-checks the unknown-attribute hex dump.
+#
+# Two knobs: the commonName's value, as positional arguments, and the two Time
+# elements, in $HC_TIME. HC_MOD is the RSA modulus INTEGER. Everything else is
+# fixed.
+HC_TIME='17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a'
+HC_MOD='02 03 00 c1 23'
+# The extensions, as a run of complete Extension elements. Empty by default,
+# which is also what makes the certificate v1 -- a version field appears only
+# when there are extensions to require it.
+HC_EXTS=''
+# issuerUniqueID [1] and subjectUniqueID [2], both IMPLICIT BIT STRINGs. X.509
+# v2 fields that RFC 5280 4.1.2.8 tells conforming CAs not to generate, so
+# nothing in /etc/ssl/certs has one and openssl will not make one.
+HC_UID=''
+# The version field, overridable so a non-minimal encoding of it can be built.
+HC_VERFIELD='a0 03 02 01 02'
+# Set to 0 around a fixture that is deliberately not valid DER, so the
+# template self-check below does not report the intended defect as a problem
+# with the harness.
+HC_CHECK=1
+
 handcert() { # handcert FILE VALUEHEX...  -- rebuild with this commonName value
 	_f=$1; shift
 	_vn=$#
+	# shellcheck disable=SC2086
+	_tn=$(set -- $HC_TIME; echo $#)
+	# shellcheck disable=SC2086
+	_mn=$(set -- $HC_MOD; echo $#)
+	# shellcheck disable=SC2086
+	_en=$(set -- $HC_EXTS; echo $#)
+	# shellcheck disable=SC2086
+	_un=$(set -- $HC_UID; echo $#)
+	if [ "$_en" -eq 0 ]; then
+		_ver=''; _vern=0; _ext=''; _extn=0
+	else
+		_ver=$HC_VERFIELD
+		# shellcheck disable=SC2086
+		_vern=$(set -- $HC_VERFIELD; echo $#)
+		_ext="a3 $(printf '%02x' $((_en + 2))) 30 $(printf '%02x' $_en) $HC_EXTS"
+		_extn=$((_en + 4))
+	fi
 	# Name = SEQUENCE { SET{ 1.2.3.4=hello } (16), SET{ CN=value } (9+n) }
 	_namec=$((16 + 9 + _vn))
-	# TBS = serial(3) sigalg(15) issuer validity(32) subject spki(32), with
-	# no version field at all, which is what makes it a v1 certificate.
-	_tbs=$((3 + 15 + (_namec + 2) + 32 + (_namec + 2) + 32))
+	# SubjectPublicKeyInfo: SEQUENCE { AlgorithmIdentifier(15),
+	# BIT STRING { SEQUENCE { modulus, exponent(5) } } }
+	_keyc=$((_mn + 5))
+	_spki=$((2 + 15 + 2 + 1 + 2 + _keyc))
+	# TBS = version serial(3) sigalg(15) issuer validity subject spki exts
+	_tbs=$((_vern + 3 + 15 + (_namec + 2) + (_tn + 2) + (_namec + 2) \
+	        + _spki + _un + _extn))
 	# TBS header is three bytes (30 81 xx) because _tbs is always above 127
 	# here; outer sigalg is 15 and the signature 7.
 	_all=$((_tbs + 3 + 15 + 7))
+	# Both long-form lengths above are one byte, so the whole fixture has to
+	# stay under 256. Said out loud rather than discovered as a parse error.
+	[ "$_all" -le 255 ] || bad "handcert $_f" \
+		"fixture is $_all bytes: too large for a one-byte long-form length"
+	# shellcheck disable=SC2086
 	der "$_f" 30 81 "$(printf '%02x' $_all)" \
 	    30 81 "$(printf '%02x' $_tbs)" \
+	    $_ver \
 	    02 01 01 \
 	    30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 \
 	    30 "$(printf '%02x' $_namec)" \
 	      31 0e 30 0c 06 03 2a 03 04 13 05 68 65 6c 6c 6f \
 	      31 "$(printf '%02x' $((_vn + 7)))" \
 	        30 "$(printf '%02x' $((_vn + 5)))" 06 03 55 04 03 "$@" \
-	    30 1e 17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a \
-	          17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a \
+	    30 "$(printf '%02x' $_tn)" $HC_TIME \
 	    30 "$(printf '%02x' $_namec)" \
 	      31 0e 30 0c 06 03 2a 03 04 13 05 68 65 6c 6c 6f \
 	      31 "$(printf '%02x' $((_vn + 7)))" \
 	        30 "$(printf '%02x' $((_vn + 5)))" 06 03 55 04 03 "$@" \
-	    30 1e 30 0d 06 09 2a 86 48 86 f7 0d 01 01 01 05 00 \
-	          03 0d 00 30 0a 02 03 00 c1 23 02 03 01 00 01 \
+	    30 "$(printf '%02x' $((_spki - 2)))" \
+	      30 0d 06 09 2a 86 48 86 f7 0d 01 01 01 05 00 \
+	      03 "$(printf '%02x' $((_keyc + 3)))" 00 \
+	        30 "$(printf '%02x' $_keyc)" $HC_MOD 02 03 01 00 01 \
+	    $HC_UID \
+	    $_ext \
 	    30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 \
 	    03 05 00 de ad be ef
 	# A fixture nobody can read proves nothing, so the shape is checked
-	# once: derx and openssl must both accept the template.
-	"$D" parse "$_f" >/dev/null 2>&1 \
+	# every time the arithmetic above is exercised with new sizes.
+	[ "$HC_CHECK" -eq 0 ] || "$D" parse "$_f" >/dev/null 2>&1 \
 	  || bad "handcert template for $_f" "derx cannot parse the fixture"
 }
 
@@ -617,6 +669,164 @@ certstricter 'cert: SEQUENCE attribute value, openssl dumps it and derx will not
 handcert "$T/h-bitval.der" 03 02 00 07
 certstricter 'cert: BIT STRING attribute value, openssl dumps it and derx will not' \
 	"$T/h-bitval.der"
+
+# ---------------------------------------------------------------------------
+# The two-digit year, and the two time encodings. RFC 5280 4.1.2.5 splits the
+# century at 2050: 50 through 99 mean 19xx and 00 through 49 mean 20xx. Only a
+# certificate dated exactly at the boundary can tell the right pivot from one
+# that is off by one, and no generated fixture lands there -- openssl's own
+# req would emit a GeneralizedTime for anything past 2049.
+# ---------------------------------------------------------------------------
+HC_TIME='17 0d 34 39 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 35 30 30 31 30 31 30 30 30 30 30 30 5a'
+handcert "$T/h-pivot.der" 13 01 78
+certfields 'cert fields: UTCTime 49 is 2049 and 50 is 1950' "$T/h-pivot.der"
+# GeneralizedTime in both positions, and then one of each, which is a shape a
+# real certificate issued near 2050 will have.
+HC_TIME='18 0f 32 30 34 39 30 31 30 31 30 30 30 30 30 30 5a
+         18 0f 32 30 35 31 30 31 30 31 30 30 30 30 30 30 5a'
+handcert "$T/h-gen.der" 13 01 78
+certfields 'cert fields: GeneralizedTime in both positions' "$T/h-gen.der"
+HC_TIME='17 0d 34 39 31 32 33 31 32 33 35 39 35 39 5a
+         18 0f 32 30 35 30 30 31 30 31 30 30 30 30 30 30 5a'
+handcert "$T/h-mixed.der" 13 01 78
+certfields 'cert fields: UTCTime notBefore, GeneralizedTime notAfter' \
+	"$T/h-mixed.der"
+# A UTCTime with no seconds. X.680 allows that form; RFC 5280 4.1.2.5 does not,
+# and openssl turns out to agree -- it refuses the certificate outright rather
+# than defaulting the seconds to zero. Asserted as a shared refusal, which is
+# where it belongs; it was written as a derx-is-stricter case and the oracle
+# said otherwise.
+HC_TIME='17 0b 32 36 30 31 30 31 30 30 30 30 5a
+         17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a'
+handcert "$T/h-nosec.der" 13 01 78
+certreject 'cert: UTCTime without seconds, refused by both' "$T/h-nosec.der"
+HC_TIME='17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a'
+
+# ---------------------------------------------------------------------------
+# A modulus with a redundant leading zero byte. openssl ignores the padding
+# and still says 16 bit; derx refuses the INTEGER, because X.690 8.3.2 applies
+# in `derx cert` exactly as it does in `derx parse`.
+#
+# This fixture exists because of a mutation that survived without it: deleting
+# the leading-zero scan from int_bits() changed nothing, since a *minimal*
+# modulus has at most one pad byte and the two calculations agree there. With
+# a second pad byte they disagree -- and with the INTEGER check shared, they
+# cannot disagree on anything derx will read, which makes the mutation
+# provably equivalent rather than merely untested.
+# ---------------------------------------------------------------------------
+HC_MOD='02 04 00 00 c1 23'
+handcert "$T/h-padmod.der" 13 01 78
+certstricter 'cert: modulus with two leading zero bytes' "$T/h-padmod.der"
+# A one-byte modulus, so the bit length is counted inside a single byte.
+HC_MOD='02 01 7f'
+handcert "$T/h-tinymod.der" 13 01 78
+certfields 'cert fields: a 7-bit RSA modulus' "$T/h-tinymod.der"
+HC_MOD='02 02 00 80'
+handcert "$T/h-8bitmod.der" 13 01 78
+certfields 'cert fields: an 8-bit RSA modulus needing a sign pad' "$T/h-8bitmod.der"
+HC_MOD='02 03 00 c1 23'
+
+# ---------------------------------------------------------------------------
+# Extensions, hand-built, because openssl's generator cannot be made to emit
+# any of these either.
+#
+# The first is the one that matters. A key usage BIT STRING declaring one
+# unused bit, with that bit set to one: 03 02 01 87. openssl's
+# ossl_c2i_ASN1_BIT_STRING masks the unused bits to zero as it parses, so it
+# reports bits 0, 5 and 6 and not bit 7 -- and without this fixture, deleting
+# the unused-bit arithmetic from derx's key usage decoder changed nothing,
+# because every other key usage in the suite has its padding bits already
+# zero. The mutation survived; this kills it.
+# ---------------------------------------------------------------------------
+HC_EXTS='30 0b 06 03 55 1d 0f 04 04 03 02 01 87'
+handcert "$T/h-kupad.der" 13 01 78
+certfields 'cert fields: key usage with a nonzero unused bit' "$T/h-kupad.der"
+certexts   'cert extensions: unused bits are masked, not reported' "$T/h-kupad.der"
+# All nine key usage bits, which needs two value octets and seven unused bits.
+HC_EXTS='30 0c 06 03 55 1d 0f 04 05 03 03 07 ff 80'
+handcert "$T/h-ku9.der" 13 01 78
+certexts 'cert extensions: all nine key usage bits' "$T/h-ku9.der"
+# critical TRUE on an extension, spelled out rather than left to openssl.
+HC_EXTS='30 0e 06 03 55 1d 0f 01 01 ff 04 04 03 02 01 86'
+handcert "$T/h-kucrit.der" 13 01 78
+certfields 'cert fields: critical flag on key usage' "$T/h-kucrit.der"
+certexts   'cert extensions: critical key usage' "$T/h-kucrit.der"
+# critical FALSE encoded explicitly. DER says the DEFAULT value must be
+# omitted, so this is a second encoding of "not critical" and derx refuses it.
+HC_EXTS='30 0e 06 03 55 1d 0f 01 01 00 04 04 03 02 01 86'
+handcert "$T/h-kucritfalse.der" 13 01 78
+certstricter 'cert: critical FALSE encoded explicitly, which DER forbids' \
+	"$T/h-kucritfalse.der"
+# An extension OID openssl has no name for: both sides print it dotted, and
+# derx marks the value as one it does not decode.
+HC_EXTS='30 0d 06 04 2a 03 04 05 04 05 30 03 01 01 ff'
+handcert "$T/h-extunknown.der" 13 01 78
+certfields 'cert fields: an extension openssl cannot name either' \
+	"$T/h-extunknown.der"
+HC_EXTS=''
+
+# The two obsolete unique identifiers, which derx skips rather than prints.
+# Nothing else in the suite reaches that loop: deleting it left every
+# assertion green until this fixture existed.
+HC_UID='81 02 00 07 82 02 00 03'
+HC_EXTS='30 0b 06 03 55 1d 0f 04 04 03 02 01 86'
+handcert "$T/h-uid.der" 13 01 78
+certfields 'cert fields: issuerUniqueID and subjectUniqueID are skipped' \
+	"$T/h-uid.der"
+certexts   'cert extensions: an extension after both unique IDs' "$T/h-uid.der"
+HC_UID=''
+
+# ---------------------------------------------------------------------------
+# Six places where an element carries more than the structure allows. All of
+# them exist because a mutation survived without them: deleting the
+# "unexpected trailing bytes" check from the cursor's rd_end() left every
+# assertion green, since nothing in the suite had any trailing bytes anywhere.
+#
+# openssl refuses five of the six outright -- its template-driven decoder is
+# exact about how many components a SEQUENCE has -- so those are shared
+# judgements. The sixth, a NULL sitting after the whole certificate, openssl
+# reads happily, taking the first object in the file and ignoring the rest.
+# ---------------------------------------------------------------------------
+HC_EXTS='30 0d 06 03 55 1d 0f 04 04 03 02 01 86 05 00'
+handcert "$T/h-exttrail.der" 13 01 78
+certreject 'cert: a NULL after an extension value, refused by both' \
+	"$T/h-exttrail.der"
+HC_EXTS='30 0b 06 03 55 1d 0f 04 04 03 02 01 86'
+# A non-minimal version INTEGER: 02 02 00 02 instead of 02 01 02.
+HC_VERFIELD='a0 04 02 02 00 02'
+HC_CHECK=0
+handcert "$T/h-vernonmin.der" 13 01 78
+HC_CHECK=1
+certreject 'cert: non-minimal version INTEGER, refused by both' \
+	"$T/h-vernonmin.der"
+# A second INTEGER inside the version field.
+HC_VERFIELD='a0 06 02 01 02 02 01 02'
+handcert "$T/h-vertwo.der" 13 01 78
+certreject 'cert: two INTEGERs in the version field, refused by both' \
+	"$T/h-vertwo.der"
+HC_VERFIELD='a0 03 02 01 02'
+HC_EXTS=''
+# A third Time in the validity SEQUENCE.
+HC_TIME='17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 32 38 30 31 30 31 30 30 30 30 30 30 5a'
+handcert "$T/h-threetimes.der" 13 01 78
+certreject 'cert: three timestamps in the validity SEQUENCE, refused by both' \
+	"$T/h-threetimes.der"
+HC_TIME='17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a
+         17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a'
+# A third element in an attribute: OID, value, and then a NULL.
+handcert "$T/h-atvtrail.der" 13 01 78 05 00
+certreject 'cert: a NULL after an attribute value, refused by both' \
+	"$T/h-atvtrail.der"
+# And bytes after the certificate itself.
+handcert "$T/h-base.der" 13 01 78
+cat "$T/h-base.der" > "$T/h-after.der"
+der "$T/nullel" 05 00
+cat "$T/nullel" >> "$T/h-after.der"
+certstricter 'cert: a NULL after the certificate' "$T/h-after.der"
 
 # `derx cert` on things that are DER but are not certificates.
 for f in csr rsakey pkcs8 eckey ecparam; do
