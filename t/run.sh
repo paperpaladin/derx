@@ -1085,6 +1085,54 @@ else
 	skipt 'single-byte corruption sweep' 'no generated certificate to corrupt'
 fi
 
+# ===========================================================================
+# 10. the command line itself
+# ===========================================================================
+# Exit 2 is reserved for "derx was invoked wrongly" and must stay distinct
+# from exit 1, "the input was not DER". A suite that asserted only "nonzero"
+# would not notice the two merging.
+cli() { # cli NAME WANT_STATUS -- ARGS...
+	_n=$1; _w=$2; shift 3
+	"$D" "$@" >/dev/null 2>"$T/c.err"; _s=$?
+	if [ "$_s" -eq "$_w" ]; then ok "$_n"
+	else bad "$_n" "want exit $_w, got $_s" "$(cat "$T/c.err")"; fi
+}
+cli 'no arguments is a usage error'        2 -- 
+cli 'one argument is a usage error'        2 -- parse
+cli 'three arguments is a usage error'     2 -- parse a b
+# Reported as an unknown subcommand, not as a file that would not open: the
+# file is deliberately not touched until the subcommand is known good.
+cli 'unknown subcommand is a usage error'  2 -- frobnicate "$T/h-base.der"
+cli 'unreadable file is not a usage error' 1 -- parse /nonexistent-derx-xyz
+cli 'unreadable file for cert'             1 -- cert  /nonexistent-derx-xyz
+
+# A FILE of "-" is stdin, for either subcommand. Checked by comparing against
+# the same file read by name, which is the only thing that could differ.
+"$D" parse "$T/h-base.der" > "$T/byname.out" 2>&1
+"$D" parse - < "$T/h-base.der" > "$T/bystdin.out" 2>&1
+if [ -s "$T/byname.out" ] && cmp -s "$T/byname.out" "$T/bystdin.out"; then
+	ok 'parse reads stdin when FILE is -'
+else
+	bad 'parse reads stdin when FILE is -' "$(diff "$T/byname.out" "$T/bystdin.out")"
+fi
+"$D" cert "$T/h-base.der" > "$T/byname.out" 2>&1
+"$D" cert - < "$T/h-base.der" > "$T/bystdin.out" 2>&1
+if [ -s "$T/byname.out" ] && cmp -s "$T/byname.out" "$T/bystdin.out"; then
+	ok 'cert reads stdin when FILE is -'
+else
+	bad 'cert reads stdin when FILE is -' "$(diff "$T/byname.out" "$T/bystdin.out")"
+fi
+# Stdin is read with fread in a loop, so a pipe that delivers the file in
+# small pieces must produce the same thing as one that does not.
+dd if="$T/h-base.der" bs=1 2>/dev/null | "$D" parse - > "$T/bypipe.out" 2>&1
+"$D" parse "$T/h-base.der" > "$T/byname.out" 2>&1
+if cmp -s "$T/byname.out" "$T/bypipe.out"; then
+	ok 'stdin arriving one byte at a time reads the same'
+else
+	bad 'stdin arriving one byte at a time reads the same' \
+	    "$(diff "$T/byname.out" "$T/bypipe.out")"
+fi
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 printf '%d DER elements compared against openssl asn1parse\n' "$elements"
 [ "$fail" -eq 0 ]
