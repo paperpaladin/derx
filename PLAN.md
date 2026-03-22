@@ -105,10 +105,10 @@ read, because everything downstream of it believes it.
 8. **The sanitizers.** Not an oracle about meaning at all -- they have no
    opinion about what the bytes say. They judge the half openssl cannot: that
    we stayed inside the buffer.
-9. **Our own mutation sweep.** Fifty-two deliberate defects, fifty-one killed
-   by a named assertion. The weakest link, since the mutations are mine, but it
-   is what found five dead checks and one real off-by-one that 121 green
-   assertions had not.
+9. **Our own mutation sweep.** Fifty-one deliberate defects, fifty killed by a
+   named assertion and one provably equivalent. The weakest link, since the
+   mutations are mine, but it is what found five dead checks and one real
+   off-by-one that 121 green assertions had not.
 
 Nothing in `t/run.sh` checks `derx` against `derx`, and a missing `openssl`
 exits 2 rather than reporting skips: with no oracle there is no pass to report.
