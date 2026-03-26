@@ -144,8 +144,11 @@ exits 2 rather than reporting skips: with no oracle there is no pass to report.
 
 ## Commit sequence
 
-Eleven commits, every one of which builds, and every one after the fifth
-green through `cq c`. Granularity is for `git bisect` and `git revert`.
+Every commit builds, verified by checking each one out into a fresh clone,
+removing the artifacts so a stale binary cannot fake a pass, and rebuilding.
+Every commit after the fifth is green through `cq c`. Granularity is for
+`git bisect` and `git revert`; no count is given here because a count in a
+file that is itself committed is always one behind.
 
 - [x] `Makefile`, `LICENSE`, `.gitignore`, and `derx.c` reduced to input,
       `hdr()` and the exact asn1parse column layout, one top-level element per
@@ -204,6 +207,12 @@ green through `cq c`. Granularity is for `git bisect` and `git revert`.
       one rarely wants to revert the other. Also: `cq c` stages the whole
       working tree, so writing both files and then calling it twice produces
       one commit and a "nothing to commit". Staged by hand instead.
+- [x] Correct the mutation counts, which commit 08 got wrong in two ways.
+      why: it claimed twenty-eight mutations where twenty-six applied and four
+      survivors where six did, having counted two of them as "changes the
+      sweep forced" instead. A count that flatters the work is the same defect
+      as a test that passes by doing nothing, so it is corrected in the README
+      and named there rather than rewritten in history.
 
 ### Milestone 1 -- close the testing gaps
 
