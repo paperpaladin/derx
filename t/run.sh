@@ -890,15 +890,34 @@ if [ "$ncert" -ge 100 ]; then
 			if [ "$st" -eq 2 ]; then
 				# openssl needed several lines; derx must have
 				# declined rather than invented a one-liner.
-				n2=$(sed -n "s/^ext=\\([^:]*\\):.*/\\1/p" "$T/d.all" | head -1)
-				edecline=$((edecline + 1))
+				# That sentence used to describe a check that
+				# was not here: edecline was incremented
+				# unconditionally and derx's answer never read,
+				# so a derx that invented a value for exactly
+				# these extensions would have been counted as
+				# having declined. The name comes from
+				# openssl's own first line in $T/e.txt, which
+				# oracle_ext has already written -- the old
+				# $n2 took the first ext line of derx's output
+				# regardless of which extension it belonged
+				# to, and was then never used at all.
+				n2=$(sed -n '1{s/: critical$//;s/: *$//;p;}' "$T/e.txt")
+				d2=$(grep "^ext=$n2:" "$T/d.all")
+				case $d2 in
+				''|*:'?') edecline=$((edecline + 1)) ;;
+				*) ewrong=$((ewrong + 1))
+				   [ -n "$efirst" ] || efirst="$f $n2: openssl needed several lines, derx answered [$d2]" ;;
+				esac
 				continue
 			fi
 			name=${o%%:*}
 			d=$(grep "^ext=$name:" "$T/d.all")
+			# Only one comparison here: the second arm used to be
+			# `[ "$d" = "ext=$name:${o#*:}" ]`, which rebuilds the
+			# very string the first arm already tested -- $o is
+			# "$name:$rest", so "ext=$o" and "ext=$name:${o#*:}"
+			# are the same characters. It could never be reached.
 			if [ "ext=$o" = "$d" ]; then
-				eagree=$((eagree + 1))
-			elif [ "$d" = "ext=$name:${o#*:}" ]; then
 				eagree=$((eagree + 1))
 			else
 				case $d in
@@ -913,10 +932,20 @@ if [ "$ncert" -ge 100 ]; then
 		bad 'cert extension values across the trust store' \
 		    "$ewrong disagreements, $eagree agreements, $edecline declined" \
 		    "$efirst"
-	elif [ "$eagree" -lt 400 ] || [ "$edecline" -gt 20 ]; then
+	# The floor scales with the store rather than being an absolute 400.
+	# This trust store yields 3.18 agreements per certificate (477 over
+	# 150), so 400 needed about 126 certificates -- while the check above
+	# deliberately accepts as few as 100, on the stated grounds that "a
+	# thinned trust store still runs". A store of 100 to 125 certificates
+	# would have passed that check and then failed this one, reporting
+	# "this group is not working" about a derx that was working. Two
+	# agreements per certificate keeps a wide margin under the measured
+	# 3.18 and cannot contradict the count that was actually accepted.
+	elif [ "$eagree" -lt $((ncert * 2)) ] || [ "$edecline" -gt 20 ]; then
 		bad 'cert extension values across the trust store' \
-		    "$eagree agreements and $edecline declined: expected hundreds of" \
-		    "agreements and under twenty declines, so this group is not working"
+		    "$eagree agreements over $ncert certificates and $edecline declined:" \
+		    "expected at least two agreements per certificate and under twenty" \
+		    "declines, so this group is not working"
 	else
 		ok "cert extension values: $eagree agree, $edecline declined as not decoded"
 	fi
