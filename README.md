@@ -398,7 +398,8 @@ the sweep forced", which is the same fact told twice and counted once.
 
 ## Design
 
-One file, `derx.c`, about 1340 lines, well over half of them comments
+One file, `derx.c`, 1339 lines, 328 of them comment-only -- 26% of the non-blank lines, not the
+"well over half" this used to claim
 explaining why openssl does something rather than what the code does.
 
 ```
