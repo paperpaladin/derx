@@ -147,7 +147,7 @@ this same set of repositories, and the number is copied from there.
 
 If `openssl` is not on `PATH`, `t/run.sh` exits 2 instead of reporting skips.
 Every expected value comes from it, so without it the suite would be comparing
-`derx` to `derx`, which is not a pass at all.
+`derx` to `derx`, and that is no pass at all.
 
 ## What works
 
@@ -179,7 +179,7 @@ This is the half of the document that matters.
 
 - No indefinite lengths, which means no BER. This is deliberate. It is
   the first thing DER removes, but it also means `derx` cannot read a CMS or
-  PKCS#7 blob produced by a streaming encoder, which is a real and common
+  PKCS#7 blob produced by a streaming encoder, a real and common
   shape. openssl reads those and prints `l=inf`.
 - No constructed strings. BER lets an OCTET STRING travel as a sequence of
   segments. DER does not, so `derx` refuses it. Same reasoning, same
@@ -194,7 +194,7 @@ This is the half of the document that matters.
   for them, so the oracle has no opinion, and inventing one would be writing a
   test against my own expectation.
 - BMPString and UniversalString are decoded only inside a distinguished
-  name. In `derx parse` they print no value, which is what openssl does;
+  name. In `derx parse` they print no value, as openssl does;
   there is no `--show-strings` mode that would decode them, because there would
   be nothing to check it against.
 - An OID arc wider than about 2^425, or an OID beyond roughly 127 arcs, is
@@ -294,8 +294,8 @@ not described:
 
 The last group is the one worth defending. `derx` is narrower than openssl
 about distinguished names on purpose: it never prints a name openssl would have
-refused to read, which is the safe direction for a tool whose output somebody
-might compare against something.
+refused to read. For a tool whose output somebody might compare against
+something, that is the safe direction.
 
 ## Where the tests are still weak
 
@@ -307,7 +307,7 @@ might compare against something.
 - The deep-nesting limit is tested at 128, 129 and 4000, not at the stack.
   4000 levels is refused by the depth check, which means the recursion itself
   has never been pushed to where it would actually break. It cannot be, while
-  the check is there, which is the point, but it does mean the claim is
+  the check is there, and that is the point, but it does mean the claim is
   "the check works", not "the recursion is safe without it".
 - One mutation survives and should not be chased. Deleting the leading-zero
   scan from `int_bits()` leaves all 216 assertions green, and it is provably
@@ -340,7 +340,7 @@ it collected receipts:
 - openssl's string conversion is not the types' own charsets. Every
   one-byte-per-character type goes through `MBSTRING_ASC`, which treats the
   byte as a code point, so a T61String byte `0xC1` becomes U+00C1, Latin-1
-  capital A-acute, and not T.61's combining acute accent, which is what the
+  capital A-acute, and not T.61's combining acute accent, the character the
   type's charset says it is. A PrintableString byte `0xE9` gets the same
   treatment, despite `0xE9` not being in PrintableString's charset at all.
 - The 40*X+Y unpacking caps X at 2. Without the cap, `2.999` decodes as
@@ -394,7 +394,7 @@ not rewritten there. Commit 08 says twenty-eight mutations against the certifica
 reader where twenty-six actually applied, two were no-ops, because the text
 they targeted had already moved, and it says four survived where six did; it
 names four in its own list and then describes the fifth and sixth as "changes
-the sweep forced", which is the same fact told twice and counted once.
+the sweep forced", the same fact told twice and counted once.
 
 ## Design
 
@@ -419,7 +419,7 @@ Every DER restriction lives in `hdr()` or in a shared checker. A reader
 that is strict about indefinite lengths in one function and lax about
 non-minimal integers in another is strict nowhere, because the lax path is the
 one hostile input takes. `int_check()` is shared by all three places an
-INTEGER's content is read, which is what makes `derx cert` exactly as strict as
+INTEGER's content is read. That is what makes `derx cert` exactly as strict as
 `derx parse`. It was not, until a mutation pointed it out.
 
 One rejection path. `die()` is the only way out of a bad input, status 1
