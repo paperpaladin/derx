@@ -139,7 +139,7 @@ ok    stdin arriving one byte at a time reads the same
 
 `make test-asan` runs the identical suite under
 `-fsanitize=address,undefined`, including both sweeps, in under a minute.
-`ASAN_OPTIONS=exitcode=86` is load-bearing and not decoration: a sanitizer
+`ASAN_OPTIONS=exitcode=86` is load-bearing and not decoration. A sanitizer
 abort exits 1 by default, the suite asserts exit 1 for "cleanly refused this
 input", and without the override a heap overflow would have scored as a
 correct diagnostic. That collision is a defect `inflate` found the hard way in
