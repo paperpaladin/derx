@@ -31,6 +31,6 @@ test-asan: derx.c
 
 clean:
 	rm -f derx derx-asan
-	rm -rf t/tmp
+	rm -rf t/tmp t/fuzz-fail t/fuzz.*/
 
 .PHONY: test test-asan clean

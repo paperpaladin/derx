@@ -1,3 +1,5 @@
 derx
 derx-asan
 t/tmp/
+t/fuzz-fail/
+t/fuzz.*/
