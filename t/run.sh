@@ -341,6 +341,15 @@ der "$T/m.der" 30
 reject 'truncated: identifier with no length' "$T/m.der"
 der "$T/m.der" 30 05 05 00
 reject 'truncated: content shorter than length' "$T/m.der"
+# Short by exactly one byte. Three bytes missing is caught by a bounds check
+# that is off by one; one byte missing is not, and it is the overread that
+# actually happens -- a length field describing one more byte than arrived.
+der "$T/m.der" 04 03 61 62
+reject 'truncated: content short by exactly one byte' "$T/m.der"
+# Same, but one level down, so the byte past the end is a sibling's tag rather
+# than a byte past the allocation. ASan cannot see this one; the oracle can.
+der "$T/m.der" 30 04 04 03 61 62 05 00
+reject 'child short by one byte reads into its sibling' "$T/m.der"
 der "$T/m.der" 04 82 01
 reject 'truncated: long-form length cut short' "$T/m.der"
 der "$T/m.der" 04 84 7f ff ff ff 41
