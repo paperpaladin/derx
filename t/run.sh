@@ -335,7 +335,385 @@ else
 fi
 
 # ===========================================================================
-# 6. malformed input: both programs refuse
+# 6. derx cert, against three different openssl subcommands
+# ===========================================================================
+# The nine non-extension fields are compared as nine whole lines. Five of
+# them are free: `openssl x509 -serial -issuer -subject -startdate -enddate`
+# prints exactly "serial=", "issuer=", "subject=", "notBefore=" and
+# "notAfter=", so derx uses those spellings and the comparison is a diff with
+# no normalisation on either side. The other four -- version, sigalg, keyalg,
+# keybits -- have no one-line flag and are extracted from -text.
+#
+# -nameopt RFC2253 rather than openssl's default, for one reason: RFC 2253 is
+# a published specification with escaping rules that can be implemented from
+# the document, where the default output is openssl's own habits and matching
+# those would be imitation rather than agreement.
+oracle_fields() { # oracle_fields FILE -> the nine lines, in derx's order
+	openssl x509 -in "$1" -inform DER -noout -text > "$T/txt" 2>/dev/null
+	sed -n 's/^ *Version: \([0-9]*\).*/version=\1/p' "$T/txt" | head -1
+	openssl x509 -in "$1" -inform DER -noout -serial
+	sed -n 's/^ *Signature Algorithm: /sigalg=/p' "$T/txt" | head -1
+	openssl x509 -in "$1" -inform DER -noout -nameopt RFC2253 -issuer
+	openssl x509 -in "$1" -inform DER -noout -startdate -enddate
+	openssl x509 -in "$1" -inform DER -noout -nameopt RFC2253 -subject
+	sed -n 's/^ *Public Key Algorithm: /keyalg=/p' "$T/txt" | head -1
+	# Ed25519 is the live case where openssl states no key size at all, so
+	# "-" is the only honest value and the absence is itself asserted.
+	_kb=$(sed -n 's/^ *Public-Key: (\([0-9]*\) bit)/keybits=\1/p' "$T/txt" | head -1)
+	if [ -n "$_kb" ]; then echo "$_kb"; else echo 'keybits=-'; fi
+}
+
+# The extension names and critical flags, in encoding order, out of -text.
+oracle_extnames() {
+	awk '/^ {8}X509v3 extensions:/ { e = 1; next }
+	     e && /^ {4}[A-Za-z]/      { e = 0 }
+	     e && /^ {12}[^ ]/ {
+		s = $0; sub(/^ {12}/, "", s); c = "-"
+		if (sub(/: critical$/, "", s)) c = "critical"
+		else sub(/: *$/, "", s)
+		printf "ext=%s:%s\n", s, c
+	     }' "$1"
+}
+
+certfields() { # certfields NAME FILE
+	_n=$1; _f=$2
+	if ! "$D" cert "$_f" > "$T/d.all" 2> "$T/d.err"; then
+		bad "$_n" "derx cert exited $?" "$(cat "$T/d.err")"; return
+	fi
+	grep -v '^ext=' "$T/d.all" > "$T/d.out"
+	oracle_fields "$_f" > "$T/o.out"
+	# Nine, every time. Fewer means a sed above stopped matching and the
+	# comparison silently shrank to the fields that still worked.
+	if [ "$(wc -l < "$T/o.out")" -ne 9 ]; then
+		bad "$_n" "the oracle produced $(wc -l < "$T/o.out") field lines, not 9" \
+		    "$(cat "$T/o.out")"
+		return
+	fi
+	if ! cmp -s "$T/d.out" "$T/o.out"; then
+		bad "$_n" "$(diff "$T/o.out" "$T/d.out")"; return
+	fi
+	# And the extension names and critical flags in order.
+	sed -E -n 's/^ext=([^:]*:(critical|-)):.*/ext=\1/p' "$T/d.all" > "$T/d.ext"
+	oracle_extnames "$T/txt" > "$T/o.ext"
+	if ! cmp -s "$T/d.ext" "$T/o.ext"; then
+		bad "$_n" "extension names differ" "$(diff "$T/o.ext" "$T/d.ext")"; return
+	fi
+	ok "$_n"
+}
+
+# One extension's value, as openssl renders it on its own, normalised into
+# derx's one-line form. Status 1 means the certificate does not carry it, 2
+# means openssl needed more than one line for the value and this format
+# cannot represent it.
+oracle_ext() { # oracle_ext FILE SHORTNAME
+	openssl x509 -in "$1" -inform DER -noout -ext "$2" 2>/dev/null > "$T/e.txt"
+	[ -s "$T/e.txt" ] || return 1
+	[ "$(wc -l < "$T/e.txt")" -eq 2 ] || return 2
+	awk 'NR == 1 { c = "-"; s = $0
+		       if (sub(/: critical$/, "", s)) c = "critical"
+		       else sub(/: *$/, "", s)
+		       n = s }
+	     NR == 2 { v = $0; sub(/^ */, "", v); printf "%s:%s:%s\n", n, c, v }' \
+		"$T/e.txt"
+	return 0
+}
+
+EXTSN='basicConstraints keyUsage extendedKeyUsage subjectKeyIdentifier
+       authorityKeyIdentifier subjectAltName'
+
+# certexts NAME FILE -- every supported extension the file carries must match
+# openssl exactly. Used on the generated fixtures, where declining to decode
+# is not an acceptable answer, so a derx that answered "?" to everything would
+# fail here.
+certexts() {
+	_n=$1; _f=$2; _cmp=0
+	"$D" cert "$_f" > "$T/d.all" 2>/dev/null
+	for _sn in $EXTSN; do
+		_o=$(oracle_ext "$_f" "$_sn") || continue
+		_name=${_o%%:*}
+		_d=$(grep "^ext=$_name:" "$T/d.all")
+		if [ "ext=$_o" != "$_d" ]; then
+			bad "$_n" "$_sn:" "  oracle: ext=$_o" "  derx:   $_d"
+			return
+		fi
+		_cmp=$((_cmp + 1))
+	done
+	if [ "$_cmp" -lt 1 ]; then
+		bad "$_n" "no extension was compared: this assertion is vacuous"
+	else
+		ok "$_n ($_cmp extensions)"
+	fi
+}
+
+for c in rsa2048-sha256 rsa1024-sha1 rsa3072-sha512 ec256-sha256 ec384-sha384 \
+         ec521-sha512 ed25519 longvalidity manyattrs dn-comma dn-spaces \
+         dn-utf8 dn-multivalue ext-san ext-ku ext-leaf; do
+	[ -f "$T/$c.der" ] || continue
+	certfields "cert fields: $c" "$T/$c.der"
+	certexts   "cert extensions: $c" "$T/$c.der"
+done
+
+# ---------------------------------------------------------------------------
+# A certificate assembled by hand, byte by byte, because openssl's own
+# generator will not produce any of these and they are all real code paths:
+#
+#   - no version field at all, which is how a v1 certificate is encoded. The
+#     absence carries the value, and nothing in /etc/ssl/certs is v1.
+#   - an attribute type openssl has no name for (1.2.3.4), which it prints as
+#     the dotted OID with the value dumped as "#" plus the hex of the whole
+#     DER element, header included.
+#   - a 16-bit RSA modulus, so the bit-length calculation is checked somewhere
+#     other than a round 2048.
+#
+# openssl verifies no signature to print these fields, so the signature here
+# is the four bytes DE AD BE EF and that is fine.
+# ---------------------------------------------------------------------------
+der "$T/hand.der" \
+ 30 81 a7 30 81 8e 02 01 01 30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 \
+ 30 1c 31 0e 30 0c 06 03 2a 03 04 13 05 68 65 6c 6c 6f 31 0a 30 08 06 03 \
+ 55 04 03 13 01 78 30 1e 17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a 17 \
+ 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a 30 1c 31 0e 30 0c 06 03 2a 03 \
+ 04 13 05 68 65 6c 6c 6f 31 0a 30 08 06 03 55 04 03 13 01 78 30 1e 30 0d \
+ 06 09 2a 86 48 86 f7 0d 01 01 01 05 00 03 0d 00 30 0a 02 03 00 c1 23 02 \
+ 03 01 00 01 30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 03 05 00 de ad \
+ be ef
+agree      'hand-built v1 certificate parses'    "$T/hand.der"
+certfields 'cert fields: hand-built v1, unknown attribute OID, 16-bit key' \
+           "$T/hand.der"
+
+# The same certificate with the commonName's value substituted, which is how
+# the string conversions openssl applies before escaping get reached at all.
+# The whole file is respelled per case rather than patched in place, because
+# changing the value's length moves five enclosing lengths; respelling makes
+# the arithmetic visible in one function instead of hidden in offsets.
+#
+# The 1.2.3.4 attribute stays in every one of these, so each case also
+# re-checks the unknown-attribute hex dump.
+handcert() { # handcert FILE VALUEHEX...  -- rebuild with this commonName value
+	_f=$1; shift
+	_vn=$#
+	# Name = SEQUENCE { SET{ 1.2.3.4=hello } (16), SET{ CN=value } (9+n) }
+	_namec=$((16 + 9 + _vn))
+	# TBS = serial(3) sigalg(15) issuer validity(32) subject spki(32), with
+	# no version field at all, which is what makes it a v1 certificate.
+	_tbs=$((3 + 15 + (_namec + 2) + 32 + (_namec + 2) + 32))
+	# TBS header is three bytes (30 81 xx) because _tbs is always above 127
+	# here; outer sigalg is 15 and the signature 7.
+	_all=$((_tbs + 3 + 15 + 7))
+	der "$_f" 30 81 "$(printf '%02x' $_all)" \
+	    30 81 "$(printf '%02x' $_tbs)" \
+	    02 01 01 \
+	    30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 \
+	    30 "$(printf '%02x' $_namec)" \
+	      31 0e 30 0c 06 03 2a 03 04 13 05 68 65 6c 6c 6f \
+	      31 "$(printf '%02x' $((_vn + 7)))" \
+	        30 "$(printf '%02x' $((_vn + 5)))" 06 03 55 04 03 "$@" \
+	    30 1e 17 0d 32 36 30 31 30 31 30 30 30 30 30 30 5a \
+	          17 0d 32 37 30 31 30 31 30 30 30 30 30 30 5a \
+	    30 "$(printf '%02x' $_namec)" \
+	      31 0e 30 0c 06 03 2a 03 04 13 05 68 65 6c 6c 6f \
+	      31 "$(printf '%02x' $((_vn + 7)))" \
+	        30 "$(printf '%02x' $((_vn + 5)))" 06 03 55 04 03 "$@" \
+	    30 1e 30 0d 06 09 2a 86 48 86 f7 0d 01 01 01 05 00 \
+	          03 0d 00 30 0a 02 03 00 c1 23 02 03 01 00 01 \
+	    30 0d 06 09 2a 86 48 86 f7 0d 01 01 0b 05 00 \
+	    03 05 00 de ad be ef
+	# A fixture nobody can read proves nothing, so the shape is checked
+	# once: derx and openssl must both accept the template.
+	"$D" parse "$_f" >/dev/null 2>&1 \
+	  || bad "handcert template for $_f" "derx cannot parse the fixture"
+}
+
+# PrintableString "caf" + 0xE9. openssl runs every one-byte-per-character
+# type through MBSTRING_ASC, which treats the byte as a code point, so 0xE9
+# becomes U+00E9 and prints as \C3\A9 -- Latin-1, not the type's own charset.
+handcert "$T/h-printable.der" 13 04 63 61 66 e9
+certfields 'cert fields: PrintableString with a high byte' "$T/h-printable.der"
+# T61String 0xC1. In T.61 that is a combining acute accent; openssl makes it
+# U+00C1, Latin-1 capital A-acute. The oracle decides, not the standard.
+handcert "$T/h-t61.der" 14 02 c1 61
+certfields 'cert fields: T61String byte 0xC1 is Latin-1, not T.61' "$T/h-t61.der"
+# BMPString: UCS-2 big endian, converted to UTF-8 and then hex-escaped.
+handcert "$T/h-bmp.der" 1e 06 00 68 00 69 00 e9
+certfields 'cert fields: BMPString' "$T/h-bmp.der"
+# UniversalString: UCS-4 big endian.
+handcert "$T/h-univ.der" 1c 08 00 00 00 68 00 00 00 e9
+certfields 'cert fields: UniversalString' "$T/h-univ.der"
+# The escapes, one fixture each, all in a UTF8String.
+handcert "$T/h-del.der"  0c 03 61 7f 62
+certfields 'cert fields: 0x7F escapes as \7F'        "$T/h-del.der"
+handcert "$T/h-nul.der"  0c 03 61 00 62
+certfields 'cert fields: NUL escapes as \00'         "$T/h-nul.der"
+handcert "$T/h-tab.der"  0c 03 61 09 62
+certfields 'cert fields: tab escapes as \09'         "$T/h-tab.der"
+handcert "$T/h-comma.der" 0c 03 61 2c 62
+certfields 'cert fields: comma escapes as backslash' "$T/h-comma.der"
+handcert "$T/h-plus.der" 0c 03 61 2b 62
+certfields 'cert fields: plus escapes as backslash'  "$T/h-plus.der"
+handcert "$T/h-eq.der"   0c 03 61 3d 62
+certfields 'cert fields: equals does not escape'     "$T/h-eq.der"
+handcert "$T/h-lead.der" 0c 03 20 61 20
+certfields 'cert fields: leading and trailing space escape' "$T/h-lead.der"
+handcert "$T/h-hash.der" 0c 03 23 61 23
+certfields 'cert fields: leading # escapes, trailing # does not' "$T/h-hash.der"
+handcert "$T/h-utf8.der" 0c 04 68 c3 a9 69
+certfields 'cert fields: UTF8String high bytes escape individually' "$T/h-utf8.der"
+
+# A UTF8String that is not valid UTF-8, and a BMPString of odd length.
+# openssl refuses the whole certificate for both, so these are reject cases
+# for `derx cert` rather than comparisons -- and the assertion includes
+# openssl's refusal, so "we agree it is unreadable" is measured.
+certreject() { # certreject NAME FILE
+	_n=$1; _f=$2
+	"$D" cert "$_f" >/dev/null 2>"$T/d.err"; _ds=$?
+	openssl x509 -in "$_f" -inform DER -noout -subject >/dev/null 2>&1; _os=$?
+	if [ "$_ds" -ne 1 ]; then
+		bad "$_n" "want derx exit 1, got $_ds" "$(cat "$T/d.err")"
+	elif ! grep -q '^derx: ' "$T/d.err"; then
+		bad "$_n" "exit 1 but no 'derx: ' diagnostic"
+	elif [ "$_os" -eq 0 ]; then
+		bad "$_n" "openssl accepted it, so refusing is ours alone"
+	else
+		ok "$_n"
+	fi
+}
+handcert "$T/h-badutf8.der" 0c 03 61 ff 62
+certreject 'cert: invalid UTF-8 in a UTF8String' "$T/h-badutf8.der"
+handcert "$T/h-oddbmp.der" 1e 03 00 61 00
+certreject 'cert: BMPString of odd length' "$T/h-oddbmp.der"
+handcert "$T/h-surrogate.der" 1e 04 d8 00 dc 00
+certreject 'cert: BMPString containing a surrogate' "$T/h-surrogate.der"
+handcert "$T/h-overlong.der" 0c 02 c0 af
+certreject 'cert: overlong UTF-8 encoding' "$T/h-overlong.der"
+# Attribute values that are not string types. openssl's X509_NAME template
+# draws its line in an odd place -- its ASN1_PRINTABLE mask takes BIT STRING
+# and SEQUENCE and dumps them as hex, but refuses INTEGER and VisibleString
+# and then declines to read the certificate at all. derx draws a narrower
+# line: anything it cannot render as text is refused. So two of these four
+# are shared judgements and two are derx being stricter, and the suite says
+# which is which rather than averaging them.
+handcert "$T/h-intval.der" 02 01 2a
+certreject 'cert: INTEGER as an attribute value, refused by both' "$T/h-intval.der"
+handcert "$T/h-visval.der" 1a 03 61 62 63
+certreject 'cert: VisibleString attribute value, refused by both' "$T/h-visval.der"
+
+certstricter() { # certstricter NAME FILE -- openssl reads it, derx will not
+	_n=$1; _f=$2
+	"$D" cert "$_f" >/dev/null 2>"$T/d.err"; _ds=$?
+	openssl x509 -in "$_f" -inform DER -noout -subject >/dev/null 2>&1; _os=$?
+	if [ "$_ds" -ne 1 ]; then
+		bad "$_n" "want derx exit 1, got $_ds" "$(cat "$T/d.err")"
+	elif ! grep -q '^derx: ' "$T/d.err"; then
+		bad "$_n" "exit 1 but no 'derx: ' diagnostic"
+	elif [ "$_os" -ne 0 ]; then
+		bad "$_n" "openssl refused it too, so this is not a divergence"
+	else
+		ok "$_n"
+	fi
+}
+handcert "$T/h-seqval.der" 30 02 05 00
+certstricter 'cert: SEQUENCE attribute value, openssl dumps it and derx will not' \
+	"$T/h-seqval.der"
+handcert "$T/h-bitval.der" 03 02 00 07
+certstricter 'cert: BIT STRING attribute value, openssl dumps it and derx will not' \
+	"$T/h-bitval.der"
+
+# `derx cert` on things that are DER but are not certificates.
+for f in csr rsakey pkcs8 eckey ecparam; do
+	[ -f "$T/$f.der" ] || continue
+	"$D" cert "$T/$f.der" >/dev/null 2>"$T/d.err"; s=$?
+	if [ "$s" -eq 1 ] && grep -q '^derx: ' "$T/d.err"; then
+		ok "cert: refuses a $f, which is DER but not a certificate"
+	else
+		bad "cert: refuses a $f, which is DER but not a certificate" \
+		    "exit $s" "$(cat "$T/d.err")"
+	fi
+done
+
+# ---------------------------------------------------------------------------
+# The whole trust store through `derx cert`.
+# ---------------------------------------------------------------------------
+if [ "$ncert" -ge 100 ]; then
+	fbad=0; ffirst=''; fcnt=0
+	for f in "$T"/corpus/*.der; do
+		"$D" cert "$f" > "$T/d.all" 2>/dev/null || { fbad=$((fbad + 1))
+			[ -n "$ffirst" ] || ffirst="$f (derx cert failed)"; continue; }
+		grep -v '^ext=' "$T/d.all" > "$T/d.out"
+		oracle_fields "$f" > "$T/o.out"
+		sed -E -n 's/^ext=([^:]*:(critical|-)):.*/ext=\1/p' "$T/d.all" > "$T/d.ext"
+		oracle_extnames "$T/txt" > "$T/o.ext"
+		if cmp -s "$T/d.out" "$T/o.out" && cmp -s "$T/d.ext" "$T/o.ext"; then
+			fcnt=$((fcnt + 1))
+		else
+			fbad=$((fbad + 1))
+			if [ -z "$ffirst" ]; then
+				ffirst=$f
+				cp "$T/d.out" "$T/f-derx"; cp "$T/o.out" "$T/f-ssl"
+				cat "$T/d.ext" >> "$T/f-derx"; cat "$T/o.ext" >> "$T/f-ssl"
+			fi
+		fi
+	done
+	if [ "$fcnt" -lt 100 ]; then
+		bad 'cert fields: the whole trust store' \
+		    "only $fcnt certificates compared, $fbad failed"
+	elif [ "$fbad" -ne 0 ]; then
+		bad 'cert fields: the whole trust store' "first failure: $ffirst" \
+		    "$(diff "$T/f-ssl" "$T/f-derx" 2>/dev/null | head -12)"
+	else
+		ok "cert fields: $fcnt certificates, 9 fields and every extension name"
+	fi
+
+	# Extension values across the corpus. Here, unlike the fixtures,
+	# declining is allowed -- 5 of these certificates have an authority key
+	# identifier carrying an issuer name and serial, which openssl prints
+	# on three lines and this one-line format cannot hold, and one has a
+	# DirName in its subjectAltName. So both numbers are asserted: the
+	# agreements have to be in the hundreds and the declines in single
+	# figures, because a derx that answered "?" to everything would
+	# otherwise pass this group while failing nothing.
+	eagree=0; edecline=0; ewrong=0; efirst=''
+	for f in "$T"/corpus/*.der; do
+		"$D" cert "$f" > "$T/d.all" 2>/dev/null || continue
+		for sn in $EXTSN; do
+			o=$(oracle_ext "$f" "$sn"); st=$?
+			[ "$st" -eq 1 ] && continue
+			if [ "$st" -eq 2 ]; then
+				# openssl needed several lines; derx must have
+				# declined rather than invented a one-liner.
+				n2=$(sed -n "s/^ext=\\([^:]*\\):.*/\\1/p" "$T/d.all" | head -1)
+				edecline=$((edecline + 1))
+				continue
+			fi
+			name=${o%%:*}
+			d=$(grep "^ext=$name:" "$T/d.all")
+			if [ "ext=$o" = "$d" ]; then
+				eagree=$((eagree + 1))
+			elif [ "$d" = "ext=$name:${o#*:}" ]; then
+				eagree=$((eagree + 1))
+			else
+				case $d in
+				*:'?') edecline=$((edecline + 1)) ;;
+				*) ewrong=$((ewrong + 1))
+				   [ -n "$efirst" ] || efirst="$f $sn: oracle [ext=$o] derx [$d]" ;;
+				esac
+			fi
+		done
+	done
+	if [ "$ewrong" -ne 0 ]; then
+		bad 'cert extension values across the trust store' \
+		    "$ewrong disagreements, $eagree agreements, $edecline declined" \
+		    "$efirst"
+	elif [ "$eagree" -lt 400 ] || [ "$edecline" -gt 20 ]; then
+		bad 'cert extension values across the trust store' \
+		    "$eagree agreements and $edecline declined: expected hundreds of" \
+		    "agreements and under twenty declines, so this group is not working"
+	else
+		ok "cert extension values: $eagree agree, $edecline declined as not decoded"
+	fi
+fi
+
+# ===========================================================================
+# 7. malformed input: both programs refuse
 # ===========================================================================
 der "$T/m.der" 30
 reject 'truncated: identifier with no length' "$T/m.der"
@@ -400,7 +778,7 @@ nest "$T/n4000.der" 4000
 reject 'nesting 4000 deep is a diagnostic, not a stack overflow' "$T/n4000.der"
 
 # ===========================================================================
-# 7. valid BER that is not valid DER: openssl accepts, derx refuses
+# 8. valid BER that is not valid DER: openssl accepts, derx refuses
 # ===========================================================================
 # Every one of these is a second encoding of a value that DER already has one
 # encoding for. The assertion includes openssl's exit 0, so "openssl is more
@@ -435,7 +813,7 @@ der "$T/s.der" 5f 01 00
 stricter 'high tag number form used for tag 1'       "$T/s.der"
 
 # ===========================================================================
-# 8. the half openssl cannot judge: derx never crashes
+# 9. the half openssl cannot judge: derx never crashes
 # ===========================================================================
 # Exit status 0 means parsed, 1 means refused, 2 means a usage error. Anything
 # else is a defect: 86 is the sanitizers (see the Makefile -- that number
