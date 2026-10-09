@@ -382,9 +382,19 @@ rig rather than in the code. Six of this one's were:
    one byte short and `derx` correctly rejected every one of them.
    `handcert()` now verifies that `derx` can parse each template it builds.
 
-Fifty-two mutations were applied in total -- twenty-four to the DER reader,
-twenty-eight to the certificate reader. Fifty-one are killed by a named
-assertion; the fifty-second is the provably equivalent one above.
+Fifty-one distinct mutations were applied -- twenty-five to the DER reader,
+twenty-six to the certificate reader. Six survived a suite that was green at
+the time: the off-by-one above, the year pivot, the key usage padding bits, the
+unique-identifier skip, `rd_end()`, and `int_check()` not being shared between
+the two subcommands. Five are now killed by a named assertion. The sixth is the
+provably equivalent one above and will stay alive.
+
+Two numbers in the commit messages are wrong and are corrected here rather than
+rewritten there. Commit 08 says twenty-eight mutations against the certificate
+reader where twenty-six actually applied -- two were no-ops, because the text
+they targeted had already moved -- and it says four survived where six did; it
+names four in its own list and then describes the fifth and sixth as "changes
+the sweep forced", which is the same fact told twice and counted once.
 
 ## Design
 
