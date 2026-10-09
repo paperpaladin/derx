@@ -1324,11 +1324,15 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
 	if (argc != 3) usage();
+	/* The subcommand is checked before the file is opened, so a typo in
+	 * the subcommand reports the typo rather than complaining about a
+	 * file whose name was never meant to be one. */
+	int docert = strcmp(argv[1], "cert") == 0;
+	if (!docert && strcmp(argv[1], "parse") != 0) usage();
 	size_t n;
 	uint8_t *b = slurp(argv[2], &n);
-	if (strcmp(argv[1], "parse") == 0) cmd_parse(b, n);
-	else if (strcmp(argv[1], "cert") == 0) cmd_cert(b, n);
-	else usage();
+	if (docert) cmd_cert(b, n);
+	else cmd_parse(b, n);
 	if (fflush(stdout) != 0) die("write error");
 	free(b);
 	return 0;
