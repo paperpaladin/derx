@@ -211,6 +211,126 @@ static void print_hdr(const Hdr *h, int depth) {
 	       depth + 1, "", tagname(h, scratch, sizeof scratch));
 }
 
+/* ------------------------------------------------------------ values */
+
+/*
+ * Which universal tags asn1parse prints a value for, and in what shape. This
+ * is not "which tags have printable content" -- BIT STRING and BMPSTRING both
+ * have content and openssl prints neither -- it is a list openssl happens to
+ * carry, so it is reproduced as a list and checked tag by tag against the
+ * oracle rather than derived from a principle that does not exist.
+ *
+ * Note the ':' is unconditional for the string tags: a zero-length
+ * PrintableString prints as ":" and nothing else.
+ */
+static int is_rawstring(unsigned tag) {
+	switch (tag) {
+	case 12: case 18: case 19: case 20: case 22: case 23: case 24: case 26:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/* openssl's test, byte for byte: printable means every byte is in the range
+ * ' ' to '~' inclusive, or is one of tab, newline or carriage return. 0x7f is
+ * not printable because it is greater than '~'. */
+static int octets_printable(const uint8_t *p, size_t n) {
+	for (size_t i = 0; i < n; i++)
+		if ((p[i] < ' ' && p[i] != '\n' && p[i] != '\r' && p[i] != '\t')
+		    || p[i] > '~')
+			return 0;
+	return 1;
+}
+
+static void put_hex(const uint8_t *p, size_t n) {
+	for (size_t i = 0; i < n; i++) printf("%02X", p[i]);
+}
+
+/*
+ * INTEGER and ENUMERATED. openssl prints sign-and-magnitude -- "-81" for the
+ * two bytes FF 7F -- because it has already decoded into an ASN1_INTEGER,
+ * which stores the magnitude and the sign separately. So a negative value has
+ * to be negated before it can be printed, and the negation is done without a
+ * buffer: for the last nonzero byte take its two's complement, for every byte
+ * before it take the ones' complement, and everything after it is zero. That
+ * is exactly invert-and-add-one carried out in place.
+ *
+ * Leading zero *bytes* of the magnitude are dropped, but no further: openssl
+ * prints -512 (FE 00) as "-0200", keeping the low zero byte, and FF 00 01 as
+ * "-FFFF", dropping the high one.
+ */
+static void print_int(const uint8_t *p, size_t n) {
+	if (n == 0) die("INTEGER of zero length");
+	/* X.690 8.3.2: the first nine bits may not be all zero or all one, or
+	 * the first octet is redundant. DER has one encoding per value and
+	 * this is the rule that makes that true for integers; openssl accepts
+	 * the redundant form and prints "BAD INTEGER". */
+	if (n > 1 && ((p[0] == 0x00 && p[1] < 0x80) || (p[0] == 0xff && p[1] >= 0x80)))
+		die("non-minimal INTEGER: redundant leading byte %02X", p[0]);
+
+	if (!(p[0] & 0x80)) {
+		size_t s = (n > 1 && p[0] == 0) ? 1 : 0;
+		put_hex(p + s, n - s);
+		return;
+	}
+	size_t k = n - 1;                      /* last nonzero byte */
+	while (k > 0 && p[k] == 0) k--;
+	size_t s = 0;                          /* first nonzero magnitude byte */
+	while (s < k && p[s] == 0xff) s++;
+	putchar('-');
+	for (size_t i = s; i < n; i++) {
+		unsigned v = i > k ? 0u
+		           : i == k ? (0x100u - p[i]) & 0xffu
+		           : (unsigned)(uint8_t)~p[i];
+		printf("%02X", v);
+	}
+}
+
+static void print_value(const uint8_t *b, const Hdr *h) {
+	const uint8_t *p = b + h->off + h->hl;
+	size_t n = h->len;
+	if (h->cls != CLS_UNIV) return;  /* openssl prints no value for these */
+
+	switch (h->tag) {
+	case 1:
+		/* X.690 11.1: DER encodes TRUE as a single 0xff octet, so
+		 * there is one encoding of each truth value. openssl prints
+		 * "BAD BOOLEAN" for anything else and carries on; a BOOLEAN
+		 * that is neither 0x00 nor 0xff is an encoder that is not
+		 * emitting DER, and nothing good is downstream of that. */
+		if (n != 1) die("BOOLEAN of length %zu, must be 1", n);
+		if (p[0] != 0x00 && p[0] != 0xff)
+			die("non-DER BOOLEAN %02X, must be 00 or FF", p[0]);
+		printf(":%u", p[0]);
+		return;
+	case 2: case 10:
+		putchar(':');
+		print_int(p, n);
+		return;
+	case 4:
+		/* An octet string holds bytes, and openssl guesses: if they
+		 * all look like text it shows them as text, otherwise as hex
+		 * behind a "[HEX DUMP]:" marker. Empty prints nothing at all,
+		 * not even the colon -- unlike the string tags. */
+		if (n == 0) return;
+		if (octets_printable(p, n)) {
+			putchar(':');
+			fwrite(p, 1, n, stdout);
+		} else {
+			fputs("[HEX DUMP]:", stdout);
+			put_hex(p, n);
+		}
+		return;
+	default:
+		if (is_rawstring(h->tag)) {
+			putchar(':');
+			fwrite(p, 1, n, stdout);
+		}
+		return;
+	}
+}
+
 /* ----------------------------------------------------------------- parse */
 
 /*
@@ -234,6 +354,7 @@ static void walk(const uint8_t *b, size_t beg, size_t end, int depth) {
 		Hdr h;
 		hdr(b, end, i, &h);
 		print_hdr(&h, depth);
+		if (!h.cons) print_value(b, &h);
 		putchar('\n');
 		if (h.cons) {
 			if (depth >= MAXDEPTH)
