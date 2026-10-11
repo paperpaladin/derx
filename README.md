@@ -16,8 +16,9 @@ PEM file has to go through `openssl x509 -outform DER` first.
 
 ```
 make          # derx
-make test
+make test         # runs make overread first
 make test-asan
+make overread     # the sanitizer gate on slurp(), on its own
 make clean
 ```
 
@@ -129,7 +130,14 @@ ok    cert fields: UTCTime 49 is 2049 and 50 is 1950
 ok    cert fields: key usage with a nonzero unused bit
 ok    cert fields: issuerUniqueID and subjectUniqueID are skipped
 ok    cert fields: 150 certificates, 9 fields and every extension name
-ok    cert extension values: 477 agree, 6 declined as not decoded
+ok    cert extension values: 483 compared, 0 disagreed with openssl
+      basicConstraints         trust store: 150 agree, 0 declined (floor 120, 0)  fixtures: 16
+      keyUsage                 trust store: 147 agree, 0 declined (floor 120, 0)  fixtures: 6
+      extendedKeyUsage         trust store:   0 agree, 0 declined (floor 0, 0)  fixtures: 1
+      subjectKeyIdentifier     trust store: 149 agree, 0 declined (floor 120, 0)  fixtures: 16
+      authorityKeyIdentifier   trust store:  29 agree, 5 declined (floor 15, 15)  fixtures: 16
+      subjectAltName           trust store:   2 agree, 1 declined (floor 1, 5)  fixtures: 1
+ok    per-extension counts: six extensions, each above its own floor
 ok    truncated: content short by exactly one byte
 ok    child short by one byte reads into its sibling
 ok    nesting 128 deep, accepted by both
@@ -145,9 +153,29 @@ ok    differential fuzzer, 600 mutants
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
 
-218 passed, 0 failed, 0 skipped
+219 passed, 0 failed, 0 skipped
 10822 DER elements compared against openssl asn1parse
 ```
+
+`make test` depends on `make overread`, which is the sanitizer gate on
+`slurp()` and prints one line of its own above the suite:
+
+```
+ok    overread: ASan sees the planted read one byte past the file
+```
+
+It builds a second binary with `-DDERX_OVERREAD`, which reads `b[n]`, one byte
+past the end of the input buffer, and the target fails unless ASan reports a
+`heap-buffer-overflow` and the process exits 86. `derx` itself exits 0, 1 or 2
+and nothing else, so 86 cannot be read as a refusal, a usage error or a crash.
+Everything it builds lives in a fresh `mktemp -d` and is removed, so it leaves
+nothing in the tree.
+
+The gate exists because nothing else in the suite can see the property. With
+the `realloc` down to the file's exact size removed from `slurp()`, the whole
+suite reports `219 passed, 0 failed` and `make test-asan` reports the same,
+while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
+Both numbers were measured that way, not assumed.
 
 `make test-asan` runs the identical suite under
 `-fsanitize=address,undefined`, including both sweeps, in under a minute.
@@ -181,7 +209,21 @@ Every expected value comes from it, so without it the suite would be comparing
   decoded.
 - Every malformed input is refused with a diagnostic on stderr and exit 1.
   Exit 2 is reserved for a usage error. Nothing reads or writes out of bounds,
-  under ASan and UBSan, across 1524 mutated inputs.
+  under ASan and UBSan, across 1524 mutated inputs, and `make overread` is the
+  gate that keeps that claim worth making.
+
+  The whole file was swept for buffers declared larger than their data, the
+  shape that turns the sanitizer off, rather than revisiting the one function
+  that was fixed last time. There is exactly one heap allocation in `derx.c`,
+  `slurp()`'s input buffer, and it is the one already trimmed to the file's
+  exact size. There is no writable object with static storage at all: `.data`
+  and `.bss` are both zero bytes, and every static object is a `const` table.
+  So the variant that no sizing fix reaches, a fixed array in static storage
+  holding untrusted input, is absent here by construction rather than by care.
+  Ten stack arrays remain, each bounded by a guard that calls `die()`, and a
+  planted read one past the end of one of them is reported as a
+  `stack-buffer-overflow` with a line number, measured rather than assumed.
+  The one exception is in "Where the tests are still weak" below.
 
 ## What does not work
 
@@ -237,12 +279,25 @@ This is the half of the document that matters.
 - Only the keyid-only form of the authority key identifier. Five of the 150
   certificates here carry one with an issuer name and serial as well, which
   openssl prints on three labelled lines. The one-line-per-extension format has
-  nowhere to put them, so the value prints as `?`.
+  nowhere to put them, so the value prints as `?`. Those five are five of the
+  six declines the suite counts, and the suite holds
+  `authorityKeyIdentifier`'s declines under a tenth of the store for that
+  reason rather than letting them disappear into one aggregate.
 - Subject alternative name covers four of nine GeneralName kinds,
   dNSName, iPAddress, rfc822Name, uniformResourceIdentifier. A directoryName,
   otherName, x400Address, ediPartyName or registeredID anywhere in the list
   makes the whole value print as `?`, deliberately: a partial list of the names
-  a certificate is valid for is worse than no list.
+  a certificate is valid for is worse than no list. One corpus certificate has
+  a DirName and is the sixth decline. The other four decoded extensions have no
+  multi-line form at all, so a `?` from any of them is `derx` failing at
+  something it claims to do, and the suite holds each of their decline counts
+  at exactly zero.
+
+  These six are declines, not refusals. `derx` still parses the file, still
+  prints the extension's name and critical flag, and still agrees with openssl
+  about both; it declines only the value. The suite counts them apart from
+  disagreements for that reason, and a disagreement fails the run where a
+  decline is measured against its own ceiling.
 - The other extensions are names only. CRL distribution points,
   certificate policies, authority information access, name constraints, policy
   constraints, inhibit anyPolicy, private key usage period, Netscape cert type:
@@ -375,16 +430,52 @@ something, that is the safe direction.
   computes `(n-1)*8 + 0`, because the bit-counting loop contributes nothing for
   a zero top byte. The two differ only on a second pad byte, which X.690 8.3.2
   forbids and which `int_check()` refuses before `int_bits()` ever runs.
+- One buffer in the program is declared far larger than what goes in it and
+  no sanitizer can see inside it. `print_name()` holds the flattened
+  attributes of a distinguished name in `Atv a[256]`, and the certificates
+  here use at most five, so 251 slots are untouched on every call. A read at
+  `a[na]`, one past the attributes that were actually decoded, was planted and
+  built with `-fsanitize=address,undefined`: no diagnostic of any kind, and
+  the program exited 0. It is inside the array, so there is no redzone to
+  cross.
+
+  Not a live defect. Every write is guarded by `na == MAXATV` and the printing
+  loop runs from `na - 1` down, so nothing reads an untouched slot today. It is
+  recorded because it is the one place in `derx.c` that no allocation size can
+  reach: the bytes of the input stay in `slurp()`'s buffer, which is exact, and
+  this array holds already-decoded headers rather than input. The fix, if it is
+  worth making, is the one `jsonc` uses, an exactly-sized allocation behind a
+  build flag with the suite run both ways, and it needs a counting pass over
+  the attributes first. It is in `PLAN.md`.
+
 - No oracle for an unknown attribute type with a non-string value. openssl
   dumps it as hex and `derx` refuses it; a *known* attribute type with a string
   value under an unnamed OID is covered by the hand-built fixture, but the
   cross product is not.
-- The extension-value group across the corpus allows declines, because six
-  of the 483 extension values genuinely cannot be represented on one line. The
-  guard against that becoming vacuous is a floor on the number of agreements
-  (477 today, asserted above 400) and a ceiling on the declines (6 today,
-  asserted below 20). Those are thresholds, not exact counts, and a change that
-  moved twenty values from "agree" to "decline" would pass.
+- Six extensions are decoded and one of them has no trust-store coverage at
+  all. That sentence was invisible until the group was counted per extension
+  instead of in total. `extendedKeyUsage` appears in 0 of the 150 certificates
+  in `/etc/ssl/certs`, because a CA root does not carry one, and its whole
+  coverage anywhere in this suite is the single generated leaf fixture
+  `ext-ku`. Deleting that one fixture takes it to zero everywhere, and the old
+  aggregate assertion stayed green when that was tried: 477 agreements, 6
+  declines, both inside their thresholds.
+
+  The counts are now per extension, printed, and each has its own floor.
+  `basicConstraints`, `keyUsage` and `subjectKeyIdentifier` supply 446 of the
+  477 between them, so the total tracked those three and absorbed everything
+  else; an extension with two cases and one with a hundred and fifty both read
+  as "agrees".
+
+  The floors are still floors on the trust-store side and not the measured
+  numbers, deliberately. The group above accepts a store of as few as 100
+  certificates on the stated grounds that a thinned store should still run, and
+  an exact 150 would call a thinned store a broken `derx`. They are fractions
+  of the store's size: four fifths of it for the three near-universal
+  extensions, a tenth for `authorityKeyIdentifier`, 1 for `subjectAltName`,
+  which is the honest minimum below which it is not exercised at all. The
+  fixture counts are exact equalities, because those inputs are built by
+  `t/run.sh` and nothing outside the repository can move them.
 
 ## On being wrong
 
@@ -412,8 +503,8 @@ it collected receipts:
 
 ## The harness is usually the bug
 
-Ten of the eighteen defects recorded across these repositories were in a test
-rig, not in the code. Eight of this one's were:
+Most of the defects recorded across these repositories were in a test rig, not
+in the code. Ten of this one's were:
 
 1. The off-by-one the suite could not see. Changing the content bounds
    check from `end - i < len` to `end - i + 1 < len` left all 121 assertions
@@ -459,6 +550,25 @@ rig, not in the code. Eight of this one's were:
    them, which is the promise that a saved failure replays by index, and
    seeds 2 and 3 do not produce the same 40. Both ways of breaking the seed
    wiring are now caught.
+9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
+   was corrected on 18 October and the correction was written up here and in
+   `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
+   the whole suite reporting `219 passed, 0 failed`, under the sanitizers as
+   well as without them. `make overread` is the only thing that notices, and
+   it is a dependency of `make test` rather than a target somebody has to
+   remember, because two repositories in this collection had the target and
+   never ran it.
+10. An extension's oracle could stop running without anything saying so.
+   The trust-store extension group reported one total, and deleting
+   `keyUsage` from the harness's list of extensions to ask openssl about left
+   that total at `330 agree, 6 declined`, which cleared the floor of two
+   agreements per certificate and passed. Four key usage fixtures did fail,
+   through the vacuity guard in `certexts`, so the suite went red, but nothing
+   in it said that an oracle had stopped running: the group that was supposed
+   to measure keyUsage printed a pass. The first version of the per-extension
+   replacement had the same hole, because it iterates that list and a deleted
+   name takes its row and its floor with it. The list's length is asserted
+   now.
 
 Fifty-one distinct mutations were applied, twenty-five to the DER reader,
 twenty-six to the certificate reader. Six survived a suite that was green at
@@ -466,6 +576,39 @@ the time: the off-by-one above, the year pivot, the key usage padding bits, the
 unique-identifier skip, `rd_end()`, and `int_check()` not being shared between
 the two subcommands. Five are now killed by a named assertion. The sixth is the
 provably equivalent one above and will stay alive.
+
+Five more were applied against the per-extension counts and the overread gate,
+three to `derx.c` and two to `t/run.sh`, and all five are killed. Two of the
+five, the third and the fifth, were passed by the whole suite as it stood, and
+a third had the extension group reporting a pass while the suite went red
+somewhere else. The old numbers are worth writing down beside them:
+
+| mutation | old suite | now |
+|---|---|---|
+| `keyUsage` declines when its BIT STRING carries two value octets | 475 agree, 8 declined, group passed; killed only by a fixture | `keyUsage: 2 declined, ceiling 0`, and its fixture count 5 against 6 |
+| `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
+| the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
+| `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
+| the `realloc` down to the exact file size removed from `slurp()` | `219 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+
+The fourth row found a defect in the replacement rather than in `derx`. Once
+the thresholds moved out of the aggregate assertion it was left printing
+`ok cert extension values: 328 agree, 155 declined`, a pass announcing a
+number that should have failed, which is the shape of defect this collection
+keeps finding: a line that says a check passed with no branch that could make
+it say anything else. It reports what it actually checks now, that nothing
+disagreed with openssl, and the counts sit next to the floors that judge them.
+
+The two mutations to `t/run.sh` are not the planned harness sweep, which is
+still queued in `PLAN.md` and will go over the whole file. They are there
+because a per-extension count can only be broken from the harness: an
+extension deleted from the list of names to ask openssl about takes its own
+floor away with it, and that is not a defect `derx.c` can express.
+
+No equivalent mutants in this group, and that is a thinner result than five
+out of five looks. These five were written to exercise the assertions that
+were just added, so all five dying says those assertions are wired up. It says
+nothing about reach the suite does not have.
 
 Two numbers in the commit messages are wrong and are corrected here,
 not rewritten there. Commit 08 says twenty-eight mutations against the certificate
@@ -476,9 +619,9 @@ the sweep forced", the same fact told twice and counted once.
 
 ## Design
 
-One file, `derx.c`, 1339 lines, 328 of them comment-only: 26% of the non-blank lines, not the
-"well over half" this used to claim
-explaining why openssl does something, not what the code does.
+One file, `derx.c`, 1358 lines, 349 of them comment-only: 27% of the non-blank
+lines, not the "well over half" this used to claim, explaining why openssl
+does something rather than what the code does.
 
 ```
 slurp  ->  hdr()  ->  walk()           derx parse

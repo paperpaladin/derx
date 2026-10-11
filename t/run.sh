@@ -421,6 +421,19 @@ oracle_ext() { # oracle_ext FILE SHORTNAME
 EXTSN='basicConstraints keyUsage extendedKeyUsage subjectKeyIdentifier
        authorityKeyIdentifier subjectAltName'
 
+# Counted per extension, because one total over six of them cannot tell an
+# extension carried by every certificate from one carried by none. It was
+# hiding exactly that: extendedKeyUsage appears in 0 of the 150 certificates
+# in the trust store, contributes 0 of the 477 agreements, and nothing in this
+# file said so. Three extensions supply 446 of the 477 between them, so the
+# total tracks those three and absorbs the rest.
+#
+# Two groups, kept apart because their floors are of different kinds. The
+# generated and hand-built fixtures are inputs this file builds, so their
+# counts are fixed and asserted as equalities. The trust store is not ours,
+# so each extension gets a floor that scales with $ncert.
+for _sn in $EXTSN; do eval "fx_$_sn=0 ag_$_sn=0 dc_$_sn=0"; done
+
 # certexts NAME FILE -- every supported extension the file carries must match
 # openssl exactly. Used on the generated fixtures, where declining to decode
 # is not an acceptable answer, so a derx that answered "?" to everything would
@@ -436,6 +449,7 @@ certexts() {
 			bad "$_n" "$_sn:" "  oracle: ext=$_o" "  derx:   $_d"
 			return
 		fi
+		eval "fx_$_sn=\$((fx_$_sn + 1))"
 		_cmp=$((_cmp + 1))
 	done
 	if [ "$_cmp" -lt 1 ]; then
@@ -904,7 +918,8 @@ if [ "$ncert" -ge 100 ]; then
 				n2=$(sed -n '1{s/: critical$//;s/: *$//;p;}' "$T/e.txt")
 				d2=$(grep "^ext=$n2:" "$T/d.all")
 				case $d2 in
-				''|*:'?') edecline=$((edecline + 1)) ;;
+				''|*:'?') edecline=$((edecline + 1))
+				   eval "dc_$sn=\$((dc_$sn + 1))" ;;
 				*) ewrong=$((ewrong + 1))
 				   [ -n "$efirst" ] || efirst="$f $n2: openssl needed several lines, derx answered [$d2]" ;;
 				esac
@@ -919,9 +934,11 @@ if [ "$ncert" -ge 100 ]; then
 			# are the same characters. It could never be reached.
 			if [ "ext=$o" = "$d" ]; then
 				eagree=$((eagree + 1))
+				eval "ag_$sn=\$((ag_$sn + 1))"
 			else
 				case $d in
-				*:'?') edecline=$((edecline + 1)) ;;
+				*:'?') edecline=$((edecline + 1))
+				   eval "dc_$sn=\$((dc_$sn + 1))" ;;
 				*) ewrong=$((ewrong + 1))
 				   [ -n "$efirst" ] || efirst="$f $sn: oracle [ext=$o] derx [$d]" ;;
 				esac
@@ -932,23 +949,132 @@ if [ "$ncert" -ge 100 ]; then
 		bad 'cert extension values across the trust store' \
 		    "$ewrong disagreements, $eagree agreements, $edecline declined" \
 		    "$efirst"
-	# The floor scales with the store rather than being an absolute 400.
-	# This trust store yields 3.18 agreements per certificate (477 over
-	# 150), so 400 needed about 126 certificates -- while the check above
-	# deliberately accepts as few as 100, on the stated grounds that "a
-	# thinned trust store still runs". A store of 100 to 125 certificates
-	# would have passed that check and then failed this one, reporting
-	# "this group is not working" about a derx that was working. Two
-	# agreements per certificate keeps a wide margin under the measured
-	# 3.18 and cannot contradict the count that was actually accepted.
-	elif [ "$eagree" -lt $((ncert * 2)) ] || [ "$edecline" -gt 20 ]; then
-		bad 'cert extension values across the trust store' \
-		    "$eagree agreements over $ncert certificates and $edecline declined:" \
-		    "expected at least two agreements per certificate and under twenty" \
-		    "declines, so this group is not working"
 	else
-		ok "cert extension values: $eagree agree, $edecline declined as not decoded"
+		# This line claims one thing only: nothing disagreed. It used to
+		# carry the thresholds too, and when those moved to the
+		# per-extension block below it was briefly left saying
+		# "ok cert extension values: 328 agree, 155 declined" about a
+		# derx with its subject key identifier decoder deleted. The
+		# counts belong in the table below, next to the floors that
+		# judge them.
+		ok "cert extension values: $((eagree + edecline)) compared, $ewrong disagreed with openssl"
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# The same six extensions, counted one at a time.
+#
+# What this replaces was a floor of two agreements per certificate and a
+# ceiling of twenty declines over the whole group. Both held, and neither
+# could see which of the six extensions was being exercised: an extension with
+# three cases and one with three thousand both read as "agrees", and the total
+# tracks whichever is largest. The first run of the per-extension count found
+# extendedKeyUsage at 0 agreements and 0 declines over the entire trust store,
+# because a CA root does not carry one, and its whole coverage anywhere in
+# this suite is the single generated leaf fixture. The aggregate 477 said
+# nothing about that and could not have.
+#
+# Measured over the 150 certificates in /etc/ssl/certs and the 22 fixtures
+# that carry a supported extension:
+#
+#   extension                 agree  decline  per cert  floor      fixtures
+#   basicConstraints            150        0     1.000  ncert*4/5        16
+#   keyUsage                    147        0     0.980  ncert*4/5         6
+#   extendedKeyUsage              0        0     0.000  0                 1
+#   subjectKeyIdentifier        149        0     0.993  ncert*4/5        16
+#   authorityKeyIdentifier       29        5     0.193  ncert/10         16
+#   subjectAltName                2        1     0.013  1                 1
+#
+# The trust-store floors are fractions of $ncert rather than the measured
+# numbers because the check above deliberately accepts a store of as few as
+# 100 certificates, and a floor of 150 would call a thinned store a broken
+# derx. 4/5 of ncert sits under the lowest of the three near-universal rates
+# (0.980) with room for a store carrying a few more exceptions than this one;
+# ncert/10 is half the measured authorityKeyIdentifier rate.
+#
+# subjectAltName's floor is 1, the honest minimum: below 1 the extension is
+# not exercised by this group at all. Its 2 agreements are the whole of its
+# trust-store coverage and it is meant to go red if the store stops carrying
+# a leaf certificate.
+#
+# extendedKeyUsage is floored at 0 here and at its exact fixture count below.
+# A floor of 1 on the trust store would be a floor that has never been met,
+# and raising the corpus to meet it means putting a leaf certificate in
+# /etc/ssl/certs, which is not ours to edit.
+# ---------------------------------------------------------------------------
+# The fixture counts are exact. These inputs are built by this file: openssl's
+# generator makes ext-san, ext-ku and ext-leaf, and the hand-built templates
+# make the key usage cases. Nothing outside the repository can move them, so a
+# floor would be weaker than an equality for no gain, and any edit that drops
+# a fixture has to come here and say so.
+fxexp_basicConstraints=16
+fxexp_keyUsage=6
+fxexp_extendedKeyUsage=1
+fxexp_subjectKeyIdentifier=16
+fxexp_authorityKeyIdentifier=16
+fxexp_subjectAltName=1
+
+ebad=''
+# Six, counted, not assumed. A per-extension check that iterates $EXTSN cannot
+# see a name deleted from $EXTSN: the row disappears along with its floor.
+# Deleting keyUsage from the list was tried, and this group reported "330
+# agree, 6 declined" and passed, because the old aggregate floor was two
+# agreements per certificate and 330 clears 300 comfortably. The four key
+# usage fixtures did fail, through certexts' vacuity guard, so the suite went
+# red, but nothing anywhere said that an extension's oracle had stopped
+# running. This line does.
+# shellcheck disable=SC2086
+enames=$(set -- $EXTSN; echo $#)
+if [ "$enames" -ne 6 ]; then
+	bad 'per-extension counts' \
+	    "EXTSN names $enames extensions, not the 6 derx decodes:" \
+	    "a name removed from the list removes its floor with it"
+fi
+for sn in $EXTSN; do
+	eval "a=\$ag_$sn; d=\$dc_$sn; x=\$fx_$sn; e=\$fxexp_$sn"
+	# The fixture equality is checked either way; the trust-store floors
+	# only when the trust-store group ran at all. Without this, an absent
+	# /etc/ssl/certs would report six floor failures underneath the one
+	# assertion that already says the store is missing, and the real
+	# message would be the hardest of the seven to find.
+	if [ "$ncert" -lt 100 ]; then
+		[ "$x" -eq "$e" ] || ebad="$ebad
+$sn: $x fixture agreements, expected exactly $e"
+		continue
+	fi
+	case $sn in
+	basicConstraints|keyUsage|subjectKeyIdentifier) amin=$((ncert * 4 / 5)) ;;
+	authorityKeyIdentifier)                         amin=$((ncert / 10)) ;;
+	subjectAltName)                                 amin=1 ;;
+	extendedKeyUsage)                               amin=0 ;;
+	esac
+	# Only two of the six can decline at all. authorityKeyIdentifier's
+	# issuer-name-and-serial form and a subjectAltName carrying a
+	# directoryName are values openssl prints on several lines and this
+	# one-line format cannot hold, so "?" is the right answer and is
+	# counted. The other four have no such form: a "?" from any of them is
+	# derx failing to decode something it claims to decode, and exactly
+	# zero is the only acceptable number. The old aggregate ceiling of 20
+	# could not say that -- fourteen keyUsage values quietly turning into
+	# "?" passed it.
+	case $sn in
+	authorityKeyIdentifier) dmax=$((ncert / 10)) ;;
+	subjectAltName)         dmax=$((ncert / 30)) ;;
+	*)                      dmax=0 ;;
+	esac
+	printf '      %-24s trust store: %3d agree, %d declined (floor %d, %d)  fixtures: %d\n' \
+	    "$sn" "$a" "$d" "$amin" "$dmax" "$x"
+	[ "$a" -ge "$amin" ] || ebad="$ebad
+$sn: $a agreements over $ncert certificates, floor $amin"
+	[ "$d" -le "$dmax" ] || ebad="$ebad
+$sn: $d declined, ceiling $dmax"
+	[ "$x" -eq "$e" ] || ebad="$ebad
+$sn: $x fixture agreements, expected exactly $e"
+done
+if [ -n "$ebad" ]; then
+	bad 'per-extension counts' "$ebad"
+else
+	ok 'per-extension counts: six extensions, each above its own floor'
 fi
 
 # ===========================================================================

@@ -1340,6 +1340,16 @@ int main(int argc, char **argv) {
 	if (!docert && strcmp(argv[1], "parse") != 0) usage();
 	size_t n;
 	uint8_t *b = slurp(argv[2], &n);
+#ifdef DERX_OVERREAD
+	/* The witness for `make overread`, and never in a real build. slurp()
+	 * reallocs the buffer down to the file's exact size, and nothing else
+	 * in the suite can tell whether it still does: while it over-allocated
+	 * 64 KiB, this read landed inside a live allocation and ASan had
+	 * nothing to say, so make test-asan reported a clean run over an area
+	 * smaller than it looked. The gate is the only witness to the fix, so
+	 * the read is here rather than described in a comment. */
+	fprintf(stderr, "derx: overread probe read %02x\n", b[n]);
+#endif
 	if (docert) cmd_cert(b, n);
 	else cmd_parse(b, n);
 	if (fflush(stdout) != 0) die("write error");
