@@ -136,11 +136,11 @@ exits 2 instead of reporting skips: with no oracle there is no pass to report.
   invariant.
 - A library. One program, two subcommands.
 - Printing every extension. Six are decoded because six are the ones
-  openssl renders on a single line, which is what makes a per-extension oracle
+  openssl renders on a single line, and that is what makes a per-extension oracle
   possible. The rest print their name and critical flag, which is checked, and
   `?` for the value, which is honest.
 - An `--lax` or `--ber` flag. Two modes means two contracts, and the second
-  one would have openssl's BER behaviour as its spec, which is a moving target.
+  one would have openssl's BER behaviour as its spec, a moving target.
 
 ## Commit sequence
 
@@ -171,7 +171,7 @@ file that is itself committed is always one behind.
       why: separable, and the one place a 64-bit accumulator would be silently
       wrong instead of failing. Landing it last among the value types means
       the corpus diff went from "every OBJECT line differs" to zero in one
-      commit, which is a clean before and after.
+      commit, a clean before and after.
 - [x] `t/run.sh`: 121 assertions, the four assertion kinds, and the guards
       against the suite doing nothing.
       why: everything above was judged by eye against openssl until this
@@ -229,7 +229,7 @@ file that is itself committed is always one behind.
       floor of 400 and a ceiling of 20.
       why: the README names this as a weakness. A change that moved twenty
       values from "agree" to "decline" would pass today. Exact counts mean a
-      trust-store update breaks the suite loudly, which is the right failure.
+      trust-store update breaks the suite loudly, the right failure.
 - [ ] Mutation-test `t/run.sh` itself: break the harness, not the code
       and confirm the breakage is visible.
       why: ten of the eighteen defects recorded across these repositories were
@@ -282,4 +282,4 @@ file that is itself committed is always one behind.
       and the failure mode is the suite breaking when a new certificate
       appears. Generating the table from openssl's own data would make the
       names the oracle's, not mine, but it also introduces a build
-      step and a file that is not in this repository, which is why it is last.
+      step and a file that is not in this repository, so it comes last.
