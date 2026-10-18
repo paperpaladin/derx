@@ -66,6 +66,15 @@ static uint8_t *slurp(const char *path, size_t *outn) {
 	}
 	if (ferror(f)) die("read error on %s", path);
 	if (f != stdin) fclose(f);
+	/* Shrink to exactly the file's size. Without this the buffer is at
+	 * least 64 KiB for a 1 KiB certificate, so a parser bug that reads
+	 * past the last content byte reads allocated memory and no sanitizer
+	 * can see it: `make test-asan` was blind to the whole class. The
+	 * differential fuzzer found that by catching a planted missing bounds
+	 * check as "derx accepted what openssl refused" while ASan stayed
+	 * silent on all 600 mutants. */
+	uint8_t *q = realloc(p, n ? n : 1);
+	if (q) p = q;
 	*outn = n;
 	return p;
 }

@@ -52,9 +52,12 @@ Three halves, and the second is the one that costs the most to get wrong:
    file, so an element overrunning its parent is an error at the point of
    decode, not a read into a sibling. Verified under
    `-fsanitize=address,undefined` across 1524 mutated inputs, every prefix of
-   a certificate, and every single-byte corruption to `00` and `FF` at every
-   offset, with `ASAN_OPTIONS=exitcode=86` so a sanitizer abort cannot be
-   mistaken for a clean refusal.
+   a certificate, every single-byte corruption to `00` and `FF` at every
+   offset, and 600 fuzzer mutants, with `ASAN_OPTIONS=exitcode=86` so a
+   sanitizer abort cannot be mistaken for a clean refusal. `slurp()` reallocs
+   the buffer down to the file's exact size for this to mean anything: while
+   it over-allocated 64 KiB, a read past the end of a 1 KiB certificate was
+   inside a live allocation and ASan saw nothing.
 2. Agreement, not resemblance. For valid DER, `derx parse` output equals
    `openssl asn1parse -i` byte for byte. Not "looks like", not "contains the
    same facts": equal, as `cmp` sees it. A single differing space anywhere
@@ -79,7 +82,9 @@ read, because everything downstream of it believes it.
    serial. This is the group that finds what the fixtures cannot.
 2. `openssl asn1parse -i`, as a diff. The strongest form an assertion can
    take: there is no expected value, no normalisation and no tolerance, just
-   two byte streams that have to be equal.
+   two byte streams that have to be equal. `t/fuzz.py` applies the same diff
+   to inputs nobody chose, 600 mutants of the corpus per run, of which 365
+   are parsed by both programs and compared.
 3. `openssl x509 -serial -issuer -subject -startdate -enddate`. Five
    whole-line comparisons with nothing in the middle, because openssl's own
    output prefixes were adopted as the format.
@@ -216,9 +221,31 @@ file that is itself committed is always one behind.
 
 ### Milestone 1: close the testing gaps
 
-- [ ] A differential fuzzer: mutate a seed corpus, run both `derx parse` and
+- [x] A differential fuzzer: mutate a seed corpus, run both `derx parse` and
       `openssl asn1parse`, and report any input where the exit statuses or the
       outputs disagree, with a shrinker.
+      done: `t/fuzz.py`, 236 lines, eight mutators, five of them blind byte
+      edits and three that keep the framing intact so the mutant is valid DER
+      saying something strange. Those three are what makes the run
+      non-vacuous: at the seed `make test` uses, 365 of 600 mutants are
+      parsed by both programs and compared, and that floor is asserted, since
+      "0 differences" over inputs nobody could parse has tested nothing.
+      Mutant i is a pure function of (seed, i) with no wall clock anywhere,
+      every failure is saved as a file and shrunk, and the suite checks the
+      reproducibility claim by digest rather than by effect. Four outcomes
+      counted apart: agreement, mismatch, derx-refuses-what-openssl-accepts,
+      and both refusing. Over 10,000 mutants at three seeds: 6,390
+      comparisons, 0 mismatches, 0 crashes, and 30 files where openssl names
+      an OID derx prints in dotted form, which is the one wrong answer it
+      found and is counted on its own line.
+      Two defects found. `slurp()` over-allocated by 64 KiB, so `make
+      test-asan` could not see a read past the end of the file at all: the
+      planted missing bounds check produced zero ASan errors in 600 mutants
+      and 33 files accepted that openssl refused. After the realloc-down fix
+      the same plant produces 31 ASan aborts. And the first version of the
+      fuzzer's own determinism assertion passed with `--seed` ignored,
+      because the two logs it compared differ on the line that echoes the
+      seed.
       why: the current corruption sweep is 00 and FF at every offset of one
       certificate, systematic but shallow, and it never produces a
       structurally valid file that is semantically strange. This is the largest

@@ -1115,6 +1115,67 @@ else
 fi
 
 # ===========================================================================
+# 9b. the differential fuzzer
+# ===========================================================================
+# The two sweeps above are systematic but shallow: one certificate, one byte
+# at a time, and almost every result is refused by both programs before any
+# value is printed. t/fuzz.py mutates the whole corpus instead, and three of
+# its eight mutators keep the framing intact, so most of its mutants are
+# valid DER files that say something strange and both programs parse them.
+# That is where the comparison happens, so the run asserts a floor on how
+# many mutants reached one: "0 differences" over inputs nobody could parse
+# is a vacuous pass, and the floor is what makes it impossible here.
+#
+# Fixed seed, no wall clock: a failure here reproduces exactly, and the
+# fuzzer writes the bytes out as well. Its scratch is its own mkdtemp, not
+# $T, so a longer run started by hand does not collide with this one.
+if command -v python3 >/dev/null 2>&1; then
+	if python3 "$ROOT/t/fuzz.py" --derx "$D" --seed 1 --count 600 \
+	     --min-compared 250 --quiet "$T"/corpus/*.der "$T"/*.der \
+	     > "$T/fuzz.log" 2>&1; then
+		ok "differential fuzzer, 600 mutants"
+		sed 's/^/      | /' "$T/fuzz.log"
+	else
+		bad 'differential fuzzer, 600 mutants' "$(cat "$T/fuzz.log")"
+	fi
+	# Determinism is what makes a failure here worth having: the seed is
+	# the only entropy, mutant i is a pure function of (seed, i), and that
+	# is the promise behind "reproduce with --start i --count 1". --digest
+	# prints the bytes' SHA-256 without running either program, so the
+	# three claims below are checked exactly rather than through their
+	# effect on a summary line.
+	#
+	# The first version of this compared two whole fuzzer logs, and it
+	# passed with --seed deliberately ignored: the logs differ on the
+	# line that echoes the seed back, so cmp saw a difference and never
+	# looked at the mutants. That assertion was checking its own echo.
+	python3 "$ROOT/t/fuzz.py" --seed 2 --start 0 --count 40 --digest \
+	    "$T"/corpus/*.der > "$T/f2.dig" 2>&1
+	python3 "$ROOT/t/fuzz.py" --seed 2 --start 30 --count 10 --digest \
+	    "$T"/corpus/*.der > "$T/f2tail.dig" 2>&1
+	python3 "$ROOT/t/fuzz.py" --seed 3 --start 0 --count 40 --digest \
+	    "$T"/corpus/*.der > "$T/f3.dig" 2>&1
+	tail -10 "$T/f2.dig" > "$T/f2last.dig"
+	if [ "$(wc -l < "$T/f2.dig")" -ne 40 ]; then
+		bad 'fuzzer: mutant i is a pure function of (seed, i)' \
+		    "--digest printed $(wc -l < "$T/f2.dig") lines, wanted 40"
+	elif ! cmp -s "$T/f2last.dig" "$T/f2tail.dig"; then
+		bad 'fuzzer: mutant i is a pure function of (seed, i)' \
+		    "--start 30 --count 10 is not the tail of --count 40:" \
+		    "a saved failure would not replay" \
+		    "$(diff "$T/f2last.dig" "$T/f2tail.dig" | head -6)"
+	elif cmp -s "$T/f2.dig" "$T/f3.dig"; then
+		bad 'fuzzer: mutant i is a pure function of (seed, i)' \
+		    'seeds 2 and 3 produced the same 40 mutants: --seed is not wired up'
+	else
+		ok 'fuzzer: mutant i is a pure function of (seed, i)'
+	fi
+else
+	skipt 'differential fuzzer' 'python3 not found'
+	skipt 'fuzzer: mutant i is a pure function of (seed, i)' 'python3 not found'
+fi
+
+# ===========================================================================
 # 10. the command line itself
 # ===========================================================================
 # Exit 2 is reserved for "derx was invoked wrongly" and must stay distinct

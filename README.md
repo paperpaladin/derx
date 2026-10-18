@@ -44,6 +44,13 @@ a way that hides a disagreement.
 Currently **10,822 DER elements** compare identically, of which 9,627 come
 from the 150 distinct certificates in `/etc/ssl/certs`.
 
+Those are fixed inputs. `t/fuzz.py` is the same diff against inputs nobody
+chose: it mutates the corpus and runs both programs over every mutant. At the
+seed and count `make test` uses, 600 mutants, 365 of them are parsed by both
+programs and compared, and the count that reached a comparison is asserted,
+not just the count that differed. A run where every mutant was refused before
+parsing has compared nothing and must not report a pass.
+
 `derx cert` is judged by three different openssl subcommands. Five of its nine
 fields are free: `openssl x509 -noout -serial -issuer -subject -startdate
 -enddate` prints lines beginning `serial=`, `issuer=`, `subject=`,
@@ -131,9 +138,14 @@ ok    indefinite length (BER only)
 ok    constructed OCTET STRING (BER segmenting)
 ok    truncation sweep: every prefix of a certificate (508 inputs)
 ok    single-byte corruption sweep: 00 and FF at every offset (1016 inputs)
+ok    differential fuzzer, 600 mutants
+      | fuzz: 365 compared and agreed, 0 mismatched, 4 differed only in an
+      | OID name, 94 refused by derx alone, 137 refused by both, 0 accepted
+      | by derx alone, 0 crashed, 0 undiagnosed
+ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
 
-216 passed, 0 failed, 0 skipped
+218 passed, 0 failed, 0 skipped
 10822 DER elements compared against openssl asn1parse
 ```
 
@@ -249,6 +261,21 @@ This is the half of the document that matters.
   not silent, but it does mean a certificate carrying an OID outside the
   table breaks the suite instead of degrading gracefully.
 
+  The fuzzer measures the gap, because mutating the content of an OID is how
+  you reach the arcs no real certificate in the corpus carries. Over 10,000
+  mutants at three seeds, 30 produced a file both programs parsed where the
+  only difference was openssl having a name and `derx` printing digits:
+  `supportedApplicationContext`, `x121Address`, `dmdName`, `X509v3 CRL
+  Number`, `secp192k1` and so on. Those are wrong answers, and the fuzzer
+  counts them on their own line rather than inside the mismatch count, which
+  is a judgement call and the reason it is written down here: they are one
+  known missing table, not thirty separate bugs, and growing that table from
+  openssl's `objects.txt` is an item in `PLAN.md`. The test for the category
+  is narrow on purpose. Every differing line must be an OBJECT line identical
+  in offset, depth, header length and length, with `derx`'s value purely
+  numeric and openssl's not. A *different* name, or different digits, stays a
+  mismatch and fails the run.
+
 ### Where derx and openssl are not comparable
 
 - Error messages and partial output. When both refuse a file, only the exit
@@ -299,11 +326,42 @@ something, that is the safe direction.
 
 ## Where the tests are still weak
 
-- No fuzzer. The corruption sweep is 00 and FF at every offset of one
-  certificate, which is systematic but shallow, it never produces a
-  *structurally valid* file that is semantically strange. A coverage-guided
-  fuzzer against `openssl asn1parse` as a differential oracle is the obvious
-  next step and is item 1 in `PLAN.md`.
+- The fuzzer is not coverage-guided. `t/fuzz.py` mutates and compares, and
+  it has no idea which branches of `derx.c` it reached. Five of its eight
+  mutators are blind byte edits whose results are mostly refused by both
+  programs before anything is printed; the other three keep the framing
+  intact, which is why most of its comparisons happen at all. Measured at
+  seed 1 over 1000 mutants: of the structure-aware mutators, swapping two
+  siblings reached a comparison 168 times out of 168, a content byte 201 of 240
+  and a retag 114 out of 218, against 0 out of 61 for truncation and 1 out of
+  58 for splicing. So the honest description is a mutation fuzzer with a
+  differential oracle, not a coverage-guided one: nothing steers it toward an
+  unvisited branch, and a path that needs two coordinated edits to reach is
+  as unlikely on the thousandth mutant as on the first.
+- The fuzzer has found one class of wrong answer and no others. Over 10,000
+  mutants at three seeds there were 0 mismatches and 30 OID-name gaps, all of
+  the one kind described above. That is a real result, not a vacuous one, and
+  the numbers that make it not vacuous are the 6,390 mutants that both
+  programs parsed and compared. But "no crashes, no disagreements" over this
+  corpus is a weaker statement than it sounds: the corpus is 150 CA
+  certificates and 70 generated files, all of which `derx` already parses, so
+  the mutants are all a short edit distance from something that works.
+- What the fuzzer is checked against is planted defects, and all four
+  planted were already covered. Four defects were put into `derx.c` one at a
+  time and the fuzzer caught all four at the seed and count `make test` uses:
+  an off-by-one in the two's-complement negation (2 mismatches), a misspelled
+  tag-21 name (4 mismatches), the non-minimal INTEGER rule deleted (3
+  mismatches), and the content-length bounds check deleted (31 crashes and 31
+  files accepted that openssl refused). The honest caveat is that the
+  existing hand-built assertions also caught all four, so none of them
+  demonstrates reach the suite did not already have. The two things the
+  fuzzer found that nothing else did are the OID-name gap and the sanitizer
+  blindness in item 7 below.
+- The corpus the fuzzer mutates is this machine's `/etc/ssl/certs`. The
+  mutant stream is a pure function of the seed *and the corpus*, so the same
+  seed on a machine with a different trust store is a different run. The
+  reproduction that always works is the saved file, which the fuzzer writes
+  for every failure.
 - The deep-nesting limit is tested at 128, 129 and 4000, not at the stack.
   4000 levels is refused by the depth check, which means the recursion itself
   has never been pushed to where it would actually break. It cannot be, while
@@ -355,14 +413,14 @@ it collected receipts:
 ## The harness is usually the bug
 
 Ten of the eighteen defects recorded across these repositories were in a test
-rig, not in the code. Six of this one's were:
+rig, not in the code. Eight of this one's were:
 
 1. The off-by-one the suite could not see. Changing the content bounds
    check from `end - i < len` to `end - i + 1 < len` left all 121 assertions
    green. Every truncation fixture was short by three bytes or more, so a check
    that is off by one still caught them. Short by exactly one is the overread
    that actually happens, and the nested version of it, where the byte past
-   the child's end is its sibling's tag, inside the allocation, is invisible
+   the child's end is its sibling's tag, inside the file, is invisible
    to ASan and visible only because openssl refuses the file.
 2. The two-digit year pivot had no boundary case. `>= 50` versus `>= 49`
    changed nothing, because openssl's own generator emits a GeneralizedTime for
@@ -381,6 +439,26 @@ rig, not in the code. Six of this one's were:
    four-byte TBSCertificate header where it is three, so fifteen fixtures were
    one byte short and `derx` correctly rejected every one of them.
    `handcert()` now verifies that `derx` can parse each template it builds.
+
+7. `make test-asan` could not see a read past the end of the file. `slurp()`
+   allocated 64 KiB and never gave the slack back, so for a 1 KiB certificate
+   every byte a parser bug might read past the last content octet was inside
+   a live allocation and no sanitizer had anything to say about it. The
+   fuzzer found this by catching the planted missing bounds check as "derx
+   accepted 33 files openssl refused" while ASan reported zero errors on all
+   600 mutants. `slurp()` now reallocs down to the exact file size, and the
+   same plant produces 31 ASan aborts. This is the general shape of the trap:
+   a sanitizer gate that has never been watched to fail is a gate whose reach
+   is a guess.
+8. The fuzzer's own determinism assertion was checking its own echo. It
+   ran the fuzzer twice at one seed and once at another and compared the
+   logs, and it passed with `--seed` deliberately ignored, because the logs
+   still differ on the line that prints the seed back. It now compares
+   SHA-256 digests of the mutants themselves, in three claims: 40 mutants are
+   produced, `--start 30 --count 10` is byte-identical to the last ten of
+   them, which is the promise that a saved failure replays by index, and
+   seeds 2 and 3 do not produce the same 40. Both ways of breaking the seed
+   wiring are now caught.
 
 Fifty-one distinct mutations were applied, twenty-five to the DER reader,
 twenty-six to the certificate reader. Six survived a suite that was green at
