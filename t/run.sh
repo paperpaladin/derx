@@ -143,6 +143,40 @@ while [ "$i" -le 30 ]; do
 done
 
 # ===========================================================================
+# 1b. the primitive-only and constructed-only rules, one assertion per tag
+# ===========================================================================
+# derx.c classifies 25 of the 31 universal tags: 22 may only be primitive,
+# since BER's constructed string form is a second encoding of one value, and
+# 3 are SEQUENCE types that may only be constructed. The suite drove exactly
+# one of those 25 bits before this block, the constructed OCTET STRING in
+# section 8, so 24 of them were a mask in the source that nothing read: a
+# table enumerated rather than exercised, which is the shape `vtparse` found
+# in its own published state table.
+#
+# Measured per bit, by compiling 25 copies of derx with one term removed from
+# the mask: dropping bit N makes derx accept the wrong form of tag N and
+# nothing else, so each of the 25 assertions below kills exactly one of them.
+#
+# openssl read every wrong-form element it was shown, all 31 tags in both
+# forms, exit 0 every time, so all 25 are places derx is stricter, and
+# `stricter` asserts openssl's acceptance beside derx's refusal. The six tags
+# openssl has no name for are classified neither way on purpose: both forms
+# of those agree instead, which turns "the oracle has no opinion" into
+# something the suite would notice losing.
+for t in 1 2 3 4 5 6 7 9 10 12 18 19 20 21 22 23 24 25 26 27 28 30; do
+	der "$T/f.der" "$(printf '%02x' $((t + 32)))" 02 05 00
+	stricter "universal tag $t may not be constructed" "$T/f.der"
+done
+for t in 8 16 17; do
+	der "$T/f.der" "$(printf '%02x' "$t")" 03 61 62 63
+	stricter "universal tag $t may not be primitive" "$T/f.der"
+done
+for t in 0 11 13 14 15 29; do
+	der "$T/f.der" "$(printf '%02x' $((t + 32)))" 02 05 00
+	agree "universal tag $t is classified neither way" "$T/f.der"
+done
+
+# ===========================================================================
 # 2. the other three tag classes, and the high-tag-number form
 # ===========================================================================
 der "$T/x.der" 40 01 41;             agree 'application class, primitive'   "$T/x.der"
@@ -1532,9 +1566,9 @@ guard 'sweep fails on a status above 2' \
 # agree() quietly stopping counting, which the total cannot, because the
 # trust store's 9,627 would still clear any floor worth setting.
 _ran=$((pass + fail + skip))
-if [ "$_ran" -ne 300 ]; then
+if [ "$_ran" -ne 331 ]; then
 	bad 'every assertion this file contains ran' \
-	    "$_ran assertions above this line, expected 300" \
+	    "$_ran assertions above this line, expected 331" \
 	    'a group that stopped running is invisible in any other way'
 else
 	ok "assertions: $_ran above this line, the number this file expects"

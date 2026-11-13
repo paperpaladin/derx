@@ -86,8 +86,11 @@ read, because everything downstream of it believes it.
 2. `openssl asn1parse -i`, as a diff. The strongest form an assertion can
    take: there is no expected value, no normalisation and no tolerance, just
    two byte streams that have to be equal. `t/fuzz.py` applies the same diff
-   to inputs nobody chose, 600 mutants of the corpus per run, of which 372
-   are parsed by both programs and compared. It is also how every row of the
+   to inputs nobody chose, 600 mutants of the corpus per run, of which
+   around 373 are parsed by both programs and compared. The figure moves by
+   a unit or two between runs of an unchanged tree, because 16 of the corpus
+   files are certificates openssl generated during the run; the floor of 250
+   is the part that is asserted. It is also how every row of the
    OID name table is read back: `asn1parse -genstr` encodes the row's dotted
    value, asn1parse names it, and the line has to match.
 3. `openssl x509 -serial -issuer -subject -startdate -enddate`. Five
@@ -107,8 +110,8 @@ read, because everything downstream of it believes it.
    multi-valued RDN, SAN/EKU/basicConstraints, plus a PKCS#10 request, a
    PKCS#1 key, a PKCS#8 PrivateKeyInfo, an EC key and bare EC parameters.
    Weaker than 1 because I chose the arguments.
-6. openssl's acceptance of inputs we refuse. Nineteen cases where openssl
-   reads BER that is not DER. Asserting openssl's exit 0 is what keeps
+6. openssl's acceptance of inputs we refuse. Forty-four cases where openssl
+   reads BER that is not DER, 25 of them one tag each in the wrong form. Asserting openssl's exit 0 is what keeps
    "openssl is more permissive here" a measurement, not a claim.
 7. Hand-built DER. The weakest of the openssl-backed groups, because I
    wrote the bytes, but openssl still judges the output, and this is the only
@@ -236,7 +239,7 @@ file that is itself committed is always one behind.
       done: `t/fuzz.py`, 236 lines, eight mutators, five of them blind byte
       edits and three that keep the framing intact so the mutant is valid DER
       saying something strange. Those three are what makes the run
-      non-vacuous: at the seed `make test` uses, 372 of 600 mutants are
+      non-vacuous: at the seed `make test` uses, around 373 of 600 mutants are
       parsed by both programs and compared, and that floor is asserted, since
       "0 differences" over inputs nobody could parse has tested nothing.
       Mutant i is a pure function of (seed, i) with no wall clock anywhere,
@@ -352,6 +355,24 @@ file that is itself committed is always one behind.
       test rig. Ten of this one's were, and the sweep found a eleventh and a
       twelfth: an oracle that can be disconnected in silence, and an element
       count that can stop counting.
+- [x] Drive both tag-form masks, one assertion per tag, instead of the one
+      bit of the 25 the suite was reaching.
+      done: 22 tags that may only be primitive, asserted in the constructed
+      form, 3 that may only be constructed, asserted in the primitive form,
+      and the 6 openssl has no name for, which are classified neither way and
+      are compared in both forms instead. openssl read every wrong-form
+      element it was shown, all 31 tags in both forms, exit 0 every time, so
+      all 25 refusals are places derx is stricter and `stricter` asserts
+      openssl's acceptance beside derx's refusal.
+      Measured per bit rather than argued: 25 copies of derx compiled with
+      one term removed from the mask, and dropping bit N makes derx accept
+      the wrong form of tag N and nothing else. Through the suite, dropping
+      one term fails exactly one assertion, deleting the constructed-form
+      refusal fails 23 and deleting the primitive-form refusal fails 3.
+      why: the same question as the OID table row above, asked of the other
+      piece of data in `derx.c` that the suite was not driving. The suite
+      reached 1 of the 25 bits, the constructed OCTET STRING, so a mask
+      written wrong in 24 places would have read as working.
 - [ ] Size `print_name()`'s attribute array to what was actually decoded,
       behind a build flag, with the suite run both ways.
       why: `Atv a[256]` holds at most five attributes for anything here, and a

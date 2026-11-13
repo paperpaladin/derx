@@ -42,15 +42,22 @@ the value formats are openssl's, down to the trailing blanks on a line with no
 value, so there is no normalisation step in the middle that could be wrong in
 a way that hides a disagreement.
 
-Currently **10,891 DER elements** compare identically, of which 9,627 come
+Currently **10,903 DER elements** compare identically, of which 9,627 come
 from the 150 distinct certificates in `/etc/ssl/certs`.
 
 Those are fixed inputs. `t/fuzz.py` is the same diff against inputs nobody
 chose: it mutates the corpus and runs both programs over every mutant. At the
-seed and count `make test` uses, 600 mutants, 372 of them are parsed by both
-programs and compared, and the count that reached a comparison is asserted,
-not just the count that differed. A run where every mutant was refused before
-parsing has compared nothing and must not report a pass.
+seed and count `make test` uses, 600 mutants, around 373 of them are parsed by
+both programs and compared, and the count that reached a comparison is
+asserted, not just the count that differed. A run where every mutant was
+refused before parsing has compared nothing and must not report a pass.
+
+"Around" is the honest word and this file used to give an exact number.
+Consecutive runs of an unchanged tree reported 372, 373 and 374: the mutant
+stream is a pure function of the seed and of the corpus, and 16 of the corpus
+files are certificates `openssl req` generated during that run, with a fresh
+key each time. What is asserted is the floor of 250, which is why the
+wandering does not matter; what was wrong was presenting the figure as fixed.
 
 `derx cert` is judged by three different openssl subcommands. Five of its nine
 fields are free: `openssl x509 -noout -serial -issuer -subject -startdate
@@ -113,6 +120,12 @@ under test: ./derx
 ok    tag 0: the name openssl prints
 ...
 ok    tag 30: the name openssl prints
+ok    universal tag 1 may not be constructed
+...
+ok    universal tag 17 may not be primitive
+ok    universal tag 0 is classified neither way
+...
+ok    universal tag 29 is classified neither way
 ok    application class, primitive
 ok    high tag number, universal 129
 ok    INTEGER -512, kept zero byte
@@ -151,8 +164,8 @@ ok    constructed OCTET STRING (BER segmenting)
 ok    truncation sweep: every prefix of a certificate (508 inputs)
 ok    single-byte corruption sweep: 00 and FF at every offset (1016 inputs)
 ok    differential fuzzer, 600 mutants
-      | fuzz: 372 compared and agreed, 0 mismatched, 4 differed only in an
-      | OID name, 87 refused by derx alone, 137 refused by both, 0 accepted
+      | fuzz: 373 compared and agreed, 0 mismatched, 4 differed only in an
+      | OID name, 86 refused by derx alone, 137 refused by both, 0 accepted
       | by derx alone, 0 crashed, 0 undiagnosed
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
@@ -167,11 +180,11 @@ ok    harness: sweep fails on an empty directory
 ok    harness: reject fails on a refusal with no diagnostic
 ok    harness: reject fails on exit 2 where it wants exit 1
 ok    harness: sweep fails on a status above 2
-ok    assertions: 300 above this line, the number this file expects
-ok    elements: 1264 from the fixtures, 9627 from the trust store
+ok    assertions: 331 above this line, the number this file expects
+ok    elements: 1276 from the fixtures, 9627 from the trust store
 
-302 passed, 0 failed, 0 skipped
-10891 DER elements compared against openssl asn1parse
+333 passed, 0 failed, 0 skipped
+10903 DER elements compared against openssl asn1parse
 ```
 
 The last thirteen lines are the suite checking itself. Eleven of them run an
@@ -202,7 +215,7 @@ nothing in the tree.
 
 The gate exists because nothing else in the suite can see the property. With
 the `realloc` down to the file's exact size removed from `slurp()`, the whole
-suite reports `302 passed, 0 failed` and `make test-asan` reports the same,
+suite reports `333 passed, 0 failed` and `make test-asan` reports the same,
 while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
@@ -222,6 +235,11 @@ Every expected value comes from it, so without it the suite would be comparing
 
 - Definite-length DER, all four tag classes, the high-tag-number form, nesting
   to openssl's own limit of 128.
+- The form rules: 22 universal tags that may only be primitive and 3 that may
+  only be constructed, each refused in the wrong form, with openssl's
+  acceptance of all 25 asserted beside the refusal. The six tags openssl has
+  no name for are classified neither way, and both forms of those are
+  compared rather than refused.
 - Values printed for the tags openssl prints values for: BOOLEAN, INTEGER and
   ENUMERATED (sign and magnitude, including the negation of a negative), OBJECT
   IDENTIFIER (arbitrary-width arcs, named from a 69-entry table or dotted),
@@ -388,11 +406,12 @@ This is the half of the document that matters.
 
 ### What derx refuses that openssl accepts
 
-Fourteen cases in `derx parse` and five more in `derx cert`. DER is a subset of
-BER and openssl reads BER, so each of these is a second encoding of a value
-that DER already has one encoding for. Each one is asserted in the suite
-*including openssl's exit 0*, so the divergence is measured,
-not described:
+Thirty-nine cases in `derx parse` and five more in `derx cert`. DER is a
+subset of BER and openssl reads BER, so each of these is a second encoding of
+a value that DER already has one encoding for. Each one is asserted in the
+suite *including openssl's exit 0*, so the divergence is measured, not
+described. Twenty-five of the thirty-nine are the wrong form of one tag, a
+row each in the table below:
 
 | input | openssl | derx |
 |---|---|---|
@@ -406,7 +425,8 @@ not described:
 | OID of zero length | `BAD OBJECT:[]` | refused |
 | OID arc padded with a zero septet | `BAD OBJECT` | refused |
 | OID content ending mid-arc | `BAD OBJECT` | refused |
-| constructed OCTET STRING | read and descended | refused |
+| constructed OCTET STRING, and the other 21 tags that may only be primitive | read and descended | refused |
+| EXTERNAL, SEQUENCE or SET in the primitive form | read | refused |
 | high tag number padded with a zero septet | read | refused |
 | high tag number form used for a tag below 31 | read | refused |
 | SEQUENCE or BIT STRING as an attribute value | dumped as hex | refused |
@@ -463,7 +483,7 @@ something, that is the safe direction.
   the check is there, and that is the point, but it does mean the claim is
   "the check works", not "the recursion is safe without it".
 - One mutation survives and should not be chased. Deleting the leading-zero
-  scan from `int_bits()` leaves all 302 assertions green, and it is provably
+  scan from `int_bits()` leaves every assertion in the suite green, and it is provably
   equivalent on anything `derx` will read. A minimal INTEGER has at most one
   leading zero byte, and only when the next byte has its high bit set. In that
   case the version with the scan computes `(n-2)*8 + 8` and the version without
@@ -593,7 +613,7 @@ in the code. Ten of this one's were:
 9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
    was corrected on 18 October and the correction was written up here and in
    `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
-   the whole suite reporting `302 passed, 0 failed`, under the sanitizers as
+   the whole suite reporting `333 passed, 0 failed`, under the sanitizers as
    well as without them. `make overread` is the only thing that notices, and
    it is a dependency of `make test` rather than a target somebody has to
    remember, because two repositories in this collection had the target and
@@ -647,7 +667,7 @@ somewhere else. The old numbers are worth writing down beside them:
 | `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
 | the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
 | `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
-| the `realloc` down to the exact file size removed from `slurp()` | `302 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+| the `realloc` down to the exact file size removed from `slurp()` | `333 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
 
 The fourth row found a defect in the replacement rather than in `derx`. Once
 the thresholds moved out of the aggregate assertion it was left printing
@@ -687,7 +707,27 @@ remembered the number.
 
 The one survivor of the earlier sweeps was re-measured rather than quoted:
 deleting the leading-zero scan from `int_bits()` still leaves every
-assertion green, now 302 of them.
+assertion in the suite green. No count is given, because that one moves with
+every commit and the claim does not.
+
+Three more were applied against the form rules, all killed and each at the
+resolution it should have. Dropping one term from `prim_only` fails exactly
+one assertion, the one for that tag. Deleting the constructed-form refusal
+altogether fails 23: the 22 tags plus the constructed OCTET STRING case that
+was already in section 8. Deleting the primitive-form refusal fails exactly
+3. The per-bit measurement was done outside the suite, by compiling 25
+copies of `derx` with one term missing from the mask in each, because 25
+suite runs at 45 seconds is a worse way to learn the same thing.
+13. The same shape again, in a bitmask rather than a table. 25 of the 31
+   universal tags are classified in `derx.c` as primitive-only or
+   constructed-only, and the suite drove one of those 25, the constructed
+   OCTET STRING. Deleting `(1u << 2)` from `prim_only`, which lets a
+   constructed INTEGER through, left every assertion green. 25 copies of
+   `derx` were compiled, one term removed from the mask in each, and
+   dropping bit N makes derx accept the wrong form of tag N and nothing
+   else, so the 25 assertions now in the suite stand one to one against
+   them. Found by asking the same question the OID table had just answered,
+   rather than by a new idea.
 
 ### Breaking the harness on purpose
 
@@ -702,20 +742,27 @@ against a stub program, chosen to make it fail, and require it to fail;
 cannot reach the real ones, and reads its first word. Two more assertions
 count what the file did.
 
-| mutation to t/run.sh | before | now |
-|---|---|---|
-| the `cmp` in `agree()` replaced by `true` | 289 passed, 0 failed | the probe on secp192k1, which openssl names and derx prints in dotted form, stops failing |
-| `agree()`'s three status and line-count checks deleted together | 289 passed, 0 failed | the probe on the empty file, where both programs print nothing, stops failing |
-| `agree()` stops adding to the element count | 289 passed, 0 failed | `1264 elements outside the trust store, floor 1000` becomes 0 |
-| `reject()`'s check on openssl's exit status deleted | 289 passed, 0 failed | the probe asserting a BER file as a shared refusal stops failing, which is the whole difference between `reject` and `stricter` |
-| `reject()`'s diagnostic check deleted | 289 passed, 0 failed | a stub that exits 1 in silence stops failing |
-| `reject()` accepts any nonzero status, not exactly 1 | 289 passed, 0 failed | a stub that exits 2 stops failing |
-| `sweep()`'s threshold raised from 2 to 200 | 289 passed, 0 failed | a stub that exits 86, which is what a sanitizer abort exits, stops failing |
-| `sweep()`'s empty-directory check deleted | 289 passed, 0 failed | the probe over an empty directory stops failing |
-| `certexts()`'s no-extension-compared check deleted | 289 passed, 0 failed | the probe over the hand-built v1, which carries no extension, stops failing |
-| section 8 deleted, the fourteen BER cases openssl accepts | 289 passed, 0 failed | `284 assertions above this line, expected 300` |
-| the oracle call in `agree()` replaced by `true` | 163 failures | the same 163, from the branch that refuses to compare against an oracle that printed nothing |
-| `certfields()`'s nine-field-lines check deleted | 39 failures | the same 39, from the field diff itself |
+The right-hand column is the only assertion that failed in each of those
+runs, which is how "ten of the twenty were invisible" is known: remove that
+one assertion and the run has nothing to report. For the first row that was
+measured rather than reasoned, by putting the mutation into the file as it
+stood before this work: `289 passed, 0 failed`, with the diff that the whole
+project rests on disconnected.
+
+| mutation to t/run.sh | the only assertion that fails |
+|---|---|
+| the `cmp` in `agree()` replaced by `true` | the probe on secp192k1, an OID openssl names and derx prints in dotted form |
+| `agree()`'s three status and line-count checks deleted together | the probe on the empty file, where both programs print nothing |
+| `agree()` stops adding to the element count | `0 elements outside the trust store, floor 1000` |
+| `reject()`'s check on openssl's exit status deleted | the probe asserting a BER file as a shared refusal, which is the whole difference between `reject` and `stricter` |
+| `reject()`'s diagnostic check deleted | the probe against a stub that exits 1 in silence |
+| `reject()` accepts any nonzero status, not exactly 1 | the probe against a stub that exits 2 |
+| `sweep()`'s threshold raised from 2 to 200 | the probe against a stub that exits 86, which is what a sanitizer abort exits |
+| `sweep()`'s empty-directory check deleted | the probe over an empty directory |
+| `certexts()`'s no-extension-compared check deleted | the probe over the hand-built v1, which carries no extension |
+| section 8 deleted, the fourteen BER cases openssl accepts | `317 assertions above this line, expected 331` |
+| the oracle call in `agree()` replaced by `true` | not one assertion but 163, from the branch that refuses to compare against an oracle that printed nothing |
+| `certfields()`'s nine-field-lines check deleted | not one but 39, from the field diff itself |
 
 The last two were already visible, and the second of them is worth naming
 for what it says about that check: deleting it does not let anything through,
