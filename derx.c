@@ -262,13 +262,18 @@ static void print_hdr(const Hdr *h, int depth) {
  * long name where it does not.
  *
  * This table is data I typed, which makes it the weakest thing in the
- * program -- so it is also the most thoroughly checked. Every entry is
- * verified by diff: get a dotted value wrong and derx prints digits where
- * asn1parse prints a name, which fails on the first certificate that carries
- * it. The RDN column is verified the same way against `openssl x509 -nameopt
- * RFC2253 -subject`. The rows came from asking openssl, not from memory: a
- * certificate was generated carrying all 24 attribute types and the names
- * read back out of its own output.
+ * program. Every row is verified by diff, and that sentence was false for 14
+ * of them for as long as the verification waited for an input to carry the
+ * OID: rsassaPss, ecdsa-with-SHA1, ED448, seven of the extension names and
+ * four of the extended key usage purposes appear in nothing under
+ * /etc/ssl/certs, nothing openssl's generator emits and no fixture. t/run.sh
+ * encodes every row's own dotted value with `openssl asn1parse -genstr` and
+ * diffs derx's line against asn1parse's, so a misspelled name fails on its
+ * own row, and so does a wrong dotted value, since the name openssl prints
+ * belongs to the OID that was encoded rather than the one that was meant.
+ * The RDN column is verified against `openssl x509 -nameopt RFC2253
+ * -subject`, by a generated certificate carrying all 24 attribute types,
+ * which is also where those rows came from: asking openssl, not memory.
  *
  * An OID absent from the table prints in dotted form, which is also what
  * openssl does for an OID it does not know -- so the two agree there as well,

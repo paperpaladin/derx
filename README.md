@@ -42,12 +42,12 @@ the value formats are openssl's, down to the trailing blanks on a line with no
 value, so there is no normalisation step in the middle that could be wrong in
 a way that hides a disagreement.
 
-Currently **10,822 DER elements** compare identically, of which 9,627 come
+Currently **10,891 DER elements** compare identically, of which 9,627 come
 from the 150 distinct certificates in `/etc/ssl/certs`.
 
 Those are fixed inputs. `t/fuzz.py` is the same diff against inputs nobody
 chose: it mutates the corpus and runs both programs over every mutant. At the
-seed and count `make test` uses, 600 mutants, 365 of them are parsed by both
+seed and count `make test` uses, 600 mutants, 372 of them are parsed by both
 programs and compared, and the count that reached a comparison is asserted,
 not just the count that differed. A run where every mutant was refused before
 parsing has compared nothing and must not report a pass.
@@ -120,6 +120,10 @@ ok    INTEGER -65535, dropped zero byte
 ok    OCTET STRING 0x7f is not printable
 ok    OID 2.999, not 26.39
 ok    OID arc wider than 64 bits
+ok    OID table: 69 rows read out of derx.c
+ok    OID table row 2.5.4.3
+...
+ok    OID table row 2.23.42.7.0
 ok    cert: rsa2048-sha256
 ...
 ok    system trust store: 150 certificates converted to DER
@@ -147,14 +151,14 @@ ok    constructed OCTET STRING (BER segmenting)
 ok    truncation sweep: every prefix of a certificate (508 inputs)
 ok    single-byte corruption sweep: 00 and FF at every offset (1016 inputs)
 ok    differential fuzzer, 600 mutants
-      | fuzz: 365 compared and agreed, 0 mismatched, 4 differed only in an
-      | OID name, 94 refused by derx alone, 137 refused by both, 0 accepted
+      | fuzz: 372 compared and agreed, 0 mismatched, 4 differed only in an
+      | OID name, 87 refused by derx alone, 137 refused by both, 0 accepted
       | by derx alone, 0 crashed, 0 undiagnosed
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
 
-219 passed, 0 failed, 0 skipped
-10822 DER elements compared against openssl asn1parse
+289 passed, 0 failed, 0 skipped
+10891 DER elements compared against openssl asn1parse
 ```
 
 `make test` depends on `make overread`, which is the sanitizer gate on
@@ -173,7 +177,7 @@ nothing in the tree.
 
 The gate exists because nothing else in the suite can see the property. With
 the `realloc` down to the file's exact size removed from `slurp()`, the whole
-suite reports `219 passed, 0 failed` and `make test-asan` reports the same,
+suite reports `289 passed, 0 failed` and `make test-asan` reports the same,
 while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
@@ -316,6 +320,17 @@ This is the half of the document that matters.
   not silent, but it does mean a certificate carrying an OID outside the
   table breaks the suite instead of degrading gracefully.
 
+  Each of the 69 rows is now driven through both programs: `openssl asn1parse
+  -genstr OID:<dotted>` encodes the row's own dotted value and asn1parse
+  names it back, so a misspelled name fails on that row and so does a wrong
+  dotted value, since the name openssl prints belongs to the OID that was
+  actually encoded. Until that group existed the table was checked only where
+  some input happened to carry the OID, which left 14 rows typed and never
+  read back: `rsassaPss`, `ecdsa-with-SHA1`, `ED448`, seven extension names
+  from Subject Directory Attributes to Inhibit Any Policy, and four of the
+  seven extended key usage purposes. All 69 agree, so nothing was wrong in
+  the table; what was wrong was the claim that it had been checked.
+
   The fuzzer measures the gap, because mutating the content of an OID is how
   you reach the arcs no real certificate in the corpus carries. Over 10,000
   mutants at three seeds, 30 produced a file both programs parsed where the
@@ -423,7 +438,7 @@ something, that is the safe direction.
   the check is there, and that is the point, but it does mean the claim is
   "the check works", not "the recursion is safe without it".
 - One mutation survives and should not be chased. Deleting the leading-zero
-  scan from `int_bits()` leaves all 216 assertions green, and it is provably
+  scan from `int_bits()` leaves all 289 assertions green, and it is provably
   equivalent on anything `derx` will read. A minimal INTEGER has at most one
   leading zero byte, and only when the next byte has its high bit set. In that
   case the version with the scan computes `(n-2)*8 + 8` and the version without
@@ -553,7 +568,7 @@ in the code. Ten of this one's were:
 9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
    was corrected on 18 October and the correction was written up here and in
    `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
-   the whole suite reporting `219 passed, 0 failed`, under the sanitizers as
+   the whole suite reporting `289 passed, 0 failed`, under the sanitizers as
    well as without them. `make overread` is the only thing that notices, and
    it is a dependency of `make test` rather than a target somebody has to
    remember, because two repositories in this collection had the target and
@@ -569,6 +584,16 @@ in the code. Ten of this one's were:
    replacement had the same hole, because it iterates that list and a deleted
    name takes its row and its floor with it. The list's length is asserted
    now.
+11. A table can be enumerated in the source and never driven. The 69 rows of
+   `oidtab[]` were described in `derx.c` as verified by diff, and the
+   verification was conditional on some input carrying the OID: 14 rows are
+   carried by nothing in `/etc/ssl/certs`, nothing openssl's generator emits
+   and no fixture, so they were typed and read back by nothing. Measured by
+   collecting every OBJECT name the oracle prints over every input the suite
+   builds and subtracting it from the table, not by reading the code.
+   Misspelling `Time Stamping` in one of those rows left the suite at `288
+   passed, 1 failed` once the new group existed and would have passed before
+   it. Nothing was wrong in the table; the claim about it was wrong.
 
 Fifty-one distinct mutations were applied, twenty-five to the DER reader,
 twenty-six to the certificate reader. Six survived a suite that was green at
@@ -589,7 +614,7 @@ somewhere else. The old numbers are worth writing down beside them:
 | `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
 | the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
 | `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
-| the `realloc` down to the exact file size removed from `slurp()` | `219 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+| the `realloc` down to the exact file size removed from `slurp()` | `289 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
 
 The fourth row found a defect in the replacement rather than in `derx`. Once
 the thresholds moved out of the aggregate assertion it was left printing
@@ -610,6 +635,27 @@ out of five looks. These five were written to exercise the assertions that
 were just added, so all five dying says those assertions are wired up. It says
 nothing about reach the suite does not have.
 
+Four more were applied against the per-row OID table group, two to `derx.c`
+and two to `t/run.sh`, and all four are killed:
+
+| mutation | without the group | with it |
+|---|---|---|
+| `Time Stamping` misspelled, a row no input carries | nothing fails | `FAIL OID table row 1.3.6.1.5.5.7.3.8`, 288 passed, 1 failed |
+| `ED448`'s dotted value changed to 1.3.101.114 | nothing fails | openssl prints the dotted form, derx prints `ED448`, 288 passed, 1 failed |
+| the `sed` that reads the rows out of `derx.c` matches nothing | the group's 69 assertions disappear and the suite reports 219 passed | `0 dotted values parsed out of 69 rows in the block, floor 69` |
+| the `awk` range that finds the table matches nothing | both counts are 0 and agree with each other | the floor of 69 fails |
+
+The first two are the whole point of the group and the second two are why it
+has a count: a group that reads its inputs out of a file can stop reading
+them, and 69 assertions quietly becoming none is a pass with a smaller
+number. The third mutation is also the clearest argument for an assertion
+`t/run.sh` does not yet have, since 219 against 289 is visible only to
+somebody who remembers the number.
+
+The one survivor of the earlier sweeps was re-measured rather than quoted:
+deleting the leading-zero scan from `int_bits()` still leaves every
+assertion green, now 289 of them.
+
 Two numbers in the commit messages are wrong and are corrected here,
 not rewritten there. Commit 08 says twenty-eight mutations against the certificate
 reader where twenty-six actually applied, two were no-ops, because the text
@@ -619,7 +665,7 @@ the sweep forced", the same fact told twice and counted once.
 
 ## Design
 
-One file, `derx.c`, 1358 lines, 349 of them comment-only: 27% of the non-blank
+One file, `derx.c`, 1363 lines, 354 of them comment-only: 28% of the non-blank
 lines, not the "well over half" this used to claim, explaining why openssl
 does something rather than what the code does.
 

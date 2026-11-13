@@ -86,8 +86,10 @@ read, because everything downstream of it believes it.
 2. `openssl asn1parse -i`, as a diff. The strongest form an assertion can
    take: there is no expected value, no normalisation and no tolerance, just
    two byte streams that have to be equal. `t/fuzz.py` applies the same diff
-   to inputs nobody chose, 600 mutants of the corpus per run, of which 365
-   are parsed by both programs and compared.
+   to inputs nobody chose, 600 mutants of the corpus per run, of which 372
+   are parsed by both programs and compared. It is also how every row of the
+   OID name table is read back: `asn1parse -genstr` encodes the row's dotted
+   value, asn1parse names it, and the line has to match.
 3. `openssl x509 -serial -issuer -subject -startdate -enddate`. Five
    whole-line comparisons with nothing in the middle, because openssl's own
    output prefixes were adopted as the format.
@@ -234,7 +236,7 @@ file that is itself committed is always one behind.
       done: `t/fuzz.py`, 236 lines, eight mutators, five of them blind byte
       edits and three that keep the framing intact so the mutant is valid DER
       saying something strange. Those three are what makes the run
-      non-vacuous: at the seed `make test` uses, 365 of 600 mutants are
+      non-vacuous: at the seed `make test` uses, 372 of 600 mutants are
       parsed by both programs and compared, and that floor is asserted, since
       "0 differences" over inputs nobody could parse has tested nothing.
       Mutant i is a pure function of (seed, i) with no wall clock anywhere,
@@ -289,7 +291,7 @@ file that is itself committed is always one behind.
       unless ASan reports a heap-buffer-overflow and the process exits 86,
       which derx itself never produces. Watched to go red: with the `realloc`
       down to the exact file size removed, `make test` and `make test-asan`
-      both report 219 passed, 0 failed and the gate is the only thing that
+      both report 289 passed, 0 failed and the gate is the only thing that
       fails. It builds in a fresh `mktemp -d` and leaves nothing behind.
       The whole file was swept rather than the one function. There is exactly
       one heap allocation in `derx.c` and it is the one already fixed; `.data`
@@ -300,6 +302,29 @@ file that is itself committed is always one behind.
       why: the fix landed on 18 October with nothing checking it, and two
       repositories in this collection had this target and never ran it. A
       sanitizer gate nobody has watched fail is a gate whose reach is a guess.
+- [x] Drive every row of the OID name table through both programs, instead
+      of waiting for an input to carry the OID.
+      done: 69 rows read out of `derx.c` by the harness, each encoded with
+      `openssl asn1parse -genstr OID:<dotted>` and diffed against
+      `asn1parse`. 69 new assertions and 69 more elements, all agreeing, so
+      the table held: what did not hold was the claim in `derx.c` that every
+      row was verified by diff. 14 rows are carried by nothing in
+      `/etc/ssl/certs`, nothing openssl's generator emits and no fixture, so
+      they had been typed and read back by nothing: `rsassaPss`,
+      `ecdsa-with-SHA1`, `ED448`, seven extension names and four of the seven
+      extended key usage purposes. Measured by collecting every OBJECT name
+      the oracle prints over every input the suite builds and subtracting it
+      from the table.
+      Four mutations, all killed. Misspelling `Time Stamping` and changing
+      `ED448`'s dotted value both leave the rest of the suite green and fail
+      only their own row. Breaking the `sed` that reads the rows drops the
+      group's 69 assertions, and the row count catches it; breaking the `awk`
+      range leaves both counts at 0 and agreeing, and the floor of 69 catches
+      that.
+      why: `vtparse` enumerated 3584 table entries without driving the parser
+      with any of them, so a cell right in the table and wrong in the code
+      read as working. This is the same shape in the other direction, and the
+      14 unexercised rows were the measure of it.
 - [ ] Mutation-test `t/run.sh` itself: break the harness, not the code
       and confirm the breakage is visible.
       why: most of the defects recorded across these repositories were in a

@@ -201,6 +201,55 @@ der "$T/x.der" 06 0c 2a 82 80 80 80 80 80 80 80 80 80 00
                                      agree 'OID arc wider than 64 bits' "$T/x.der"
 
 # ===========================================================================
+# 3b. every row of the OID name table
+# ===========================================================================
+# The comment above oidtab[] in derx.c said every row of it was verified by
+# diff. That was true of 55 rows. A row is checked only when some input
+# carries the OID, and 14 of the 69 are carried by nothing in /etc/ssl/certs,
+# nothing openssl's generator emits and no hand-built fixture: rsassaPss,
+# ecdsa-with-SHA1, ED448, seven extension names from Subject Directory
+# Attributes to Inhibit Any Policy, and four of the seven extended key usage
+# purposes. Those were typed and never read back, which is the shape a table
+# in a repository has when it is enumerated rather than exercised.
+#
+# So each row supplies its own input. openssl encodes the dotted form with
+# `asn1parse -genstr`, openssl names it back, and derx has to print the same
+# line. A misspelled name fails; so does a wrong dotted value, because the
+# name comes from the OID that was actually encoded, not from the one that
+# was meant.
+#
+# The rows are read out of derx.c rather than copied here, because the table
+# is the thing being exercised and a copy would be a second table to keep in
+# step. Two counts guard the reading, deliberately by different patterns: the
+# rows the sed understood must equal the lines in the block that hold a
+# quoted string, so a row written in another shape cannot be skipped in
+# silence, and 69 is a floor, so an extraction that matched nothing cannot
+# report a pass.
+oidrows=$(awk '/^static const struct .* oidtab\[\] = \{/,/^\};/' "$ROOT/derx.c" |
+          sed -n 's/^	{ *"\([^"]*\)".*/\1/p')
+oidn=$(printf '%s\n' "$oidrows" | sed '/^$/d' | wc -l)
+oidq=$(awk '/^static const struct .* oidtab\[\] = \{/,/^\};/' "$ROOT/derx.c" |
+       grep -c '"')
+if [ "$oidn" -ne "$oidq" ] || [ "$oidn" -lt 69 ]; then
+	bad 'OID table rows read out of derx.c' \
+	    "$oidn dotted values parsed out of $oidq rows in the block, floor 69" \
+	    'a row the sed cannot read is a row this group does not exercise'
+else
+	ok "OID table: $oidn rows read out of derx.c"
+	for dot in $oidrows; do
+		if openssl asn1parse -genstr "OID:$dot" -out "$T/oid.der" \
+		     -noout 2>/dev/null; then
+			agree "OID table row $dot" "$T/oid.der"
+		else
+			# Not a skip: a dotted value openssl will not encode
+			# is not an OID, whatever the table says.
+			bad "OID table row $dot" \
+			    'openssl asn1parse -genstr refused to encode it'
+		fi
+	done
+fi
+
+# ===========================================================================
 # 4. generated certificates and keys: real DER from the oracle's own encoder
 # ===========================================================================
 gen() { # gen NAME ARGS...  produce $T/NAME.der from openssl req -x509
