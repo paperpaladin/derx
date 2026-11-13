@@ -234,7 +234,11 @@ while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
 `make test-asan` runs the identical suite under
-`-fsanitize=address,undefined`, including both sweeps, in under a minute.
+`-fsanitize=address,undefined`, including both sweeps, in about seventy
+seconds against a plain run's forty-five. It is not a dependency of
+`make test`, so it is a target somebody has to remember, and the figure above
+is from running it at this commit rather than from the last time it was
+quoted.
 `ASAN_OPTIONS=exitcode=86` is load-bearing and not decoration. A sanitizer
 abort exits 1 by default, the suite asserts exit 1 for "cleanly refused this
 input", and without the override a heap overflow would have scored as a
@@ -835,6 +839,21 @@ for what it says about that check: deleting it does not let anything through,
 because the diff underneath fails anyway. What the check buys is the
 message, which names the `sed` that stopped matching instead of printing
 nine lines of difference.
+
+One question the sweep does not answer, worth stating because a sibling
+repository took an oracle's exit status for agreement and counted an oracle
+that read nothing as one that agreed: can a comparison here tell "openssl
+said the same thing" from "openssl said nothing"? In `agree()` it can, and
+the probe above is what holds it. The trust-store loop does not go through
+`agree()`, and there the answer rests on a measurement rather than on a
+check. `openssl asn1parse` writes `Error in encoding` to *stdout* for input
+it refuses, and prints nothing at all only for an empty file, which that loop
+cannot contain: every file in it was written by `openssl x509 -outform DER`
+from a certificate openssl had just read. So two empty outputs comparing
+equal is unreachable there, and the backstop if it ever were not is the floor
+of 5,000 elements, which a loop comparing nothing cannot clear. No check was
+added for it, because a check nobody can watch fail is the thing this section
+is about.
 
 Eight survive, in two classes, and neither is a hole a harness can close
 from the inside.
