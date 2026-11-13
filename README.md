@@ -156,10 +156,35 @@ ok    differential fuzzer, 600 mutants
       | by derx alone, 0 crashed, 0 undiagnosed
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
+ok    harness: agree fails on a differing OBJECT value
+ok    harness: agree fails when both programs refuse the input
+ok    harness: reject fails when derx accepts the input
+ok    harness: reject fails when openssl accepts what is claimed as shared
+ok    harness: certreject fails when openssl accepts the certificate
+ok    harness: certstricter fails when openssl refuses it too
+ok    harness: certexts fails when no extension was compared
+ok    harness: sweep fails on an empty directory
+ok    harness: reject fails on a refusal with no diagnostic
+ok    harness: reject fails on exit 2 where it wants exit 1
+ok    harness: sweep fails on a status above 2
+ok    assertions: 300 above this line, the number this file expects
+ok    elements: 1264 from the fixtures, 9627 from the trust store
 
-289 passed, 0 failed, 0 skipped
+302 passed, 0 failed, 0 skipped
 10891 DER elements compared against openssl asn1parse
 ```
+
+The last thirteen lines are the suite checking itself. Eleven of them run an
+assertion against an input, or against a stub program, chosen to make that
+assertion fail, and require it to fail: a check that has never been seen to
+report a failure may be checking nothing, and ten of twenty mutations to
+`t/run.sh` used to leave it green. The twelfth is the number of assertions
+the file ran, compared against a literal, because a group that stops running
+leaves nothing behind but a smaller number. The thirteenth splits the element
+total into the part the fixtures produce and the part that comes from
+whatever is in `/etc/ssl/certs`, so the share that moves with the machine is
+visible and the share that does not can have a floor. Both are in
+[Breaking the harness on purpose](#breaking-the-harness-on-purpose).
 
 `make test` depends on `make overread`, which is the sanitizer gate on
 `slurp()` and prints one line of its own above the suite:
@@ -177,7 +202,7 @@ nothing in the tree.
 
 The gate exists because nothing else in the suite can see the property. With
 the `realloc` down to the file's exact size removed from `slurp()`, the whole
-suite reports `289 passed, 0 failed` and `make test-asan` reports the same,
+suite reports `302 passed, 0 failed` and `make test-asan` reports the same,
 while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
@@ -438,7 +463,7 @@ something, that is the safe direction.
   the check is there, and that is the point, but it does mean the claim is
   "the check works", not "the recursion is safe without it".
 - One mutation survives and should not be chased. Deleting the leading-zero
-  scan from `int_bits()` leaves all 289 assertions green, and it is provably
+  scan from `int_bits()` leaves all 302 assertions green, and it is provably
   equivalent on anything `derx` will read. A minimal INTEGER has at most one
   leading zero byte, and only when the next byte has its high bit set. In that
   case the version with the scan computes `(n-2)*8 + 8` and the version without
@@ -568,7 +593,7 @@ in the code. Ten of this one's were:
 9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
    was corrected on 18 October and the correction was written up here and in
    `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
-   the whole suite reporting `289 passed, 0 failed`, under the sanitizers as
+   the whole suite reporting `302 passed, 0 failed`, under the sanitizers as
    well as without them. `make overread` is the only thing that notices, and
    it is a dependency of `make test` rather than a target somebody has to
    remember, because two repositories in this collection had the target and
@@ -594,6 +619,14 @@ in the code. Ten of this one's were:
    Misspelling `Time Stamping` in one of those rows left the suite at `288
    passed, 1 failed` once the new group existed and would have passed before
    it. Nothing was wrong in the table; the claim about it was wrong.
+12. The main oracle could be disconnected without a word being said.
+   Replacing the `cmp` in `agree()` with `true`, so that the diff between
+   `derx parse` and `asn1parse` never runs, left `289 passed, 0 failed`. One
+   word turned the strongest assertion in the project into 163 passes over
+   comparisons that did not happen, and nothing else in the file compares
+   those two byte streams. It is caught now by a probe on an OID openssl
+   names and `derx` does not, the one disagreement this suite can produce on
+   demand.
 
 Fifty-one distinct mutations were applied, twenty-five to the DER reader,
 twenty-six to the certificate reader. Six survived a suite that was green at
@@ -614,7 +647,7 @@ somewhere else. The old numbers are worth writing down beside them:
 | `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
 | the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
 | `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
-| the `realloc` down to the exact file size removed from `slurp()` | `289 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+| the `realloc` down to the exact file size removed from `slurp()` | `302 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
 
 The fourth row found a defect in the replacement rather than in `derx`. Once
 the thresholds moved out of the aggregate assertion it was left printing
@@ -648,13 +681,75 @@ and two to `t/run.sh`, and all four are killed:
 The first two are the whole point of the group and the second two are why it
 has a count: a group that reads its inputs out of a file can stop reading
 them, and 69 assertions quietly becoming none is a pass with a smaller
-number. The third mutation is also the clearest argument for an assertion
-`t/run.sh` does not yet have, since 219 against 289 is visible only to
-somebody who remembers the number.
+number. The third mutation is what put the assertion count in the suite,
+described below, since 219 against 289 was visible only to somebody who
+remembered the number.
 
 The one survivor of the earlier sweeps was re-measured rather than quoted:
 deleting the leading-zero scan from `int_bits()` still leaves every
-assertion green, now 289 of them.
+assertion green, now 302 of them.
+
+### Breaking the harness on purpose
+
+`PLAN.md` had an item for mutating this file instead of `derx.c`, on the
+grounds that most of the defects above were in it. 20 mutations were applied,
+one at a time, each run against an unmodified `derx`. Ten of the twenty left
+the suite reporting `289 passed, 0 failed`.
+
+Twelve are killed now. Eleven assertions run the harness against an input, or
+against a stub program, chosen to make it fail, and require it to fail;
+`guard` runs one assertion inside a command substitution, where its counters
+cannot reach the real ones, and reads its first word. Two more assertions
+count what the file did.
+
+| mutation to t/run.sh | before | now |
+|---|---|---|
+| the `cmp` in `agree()` replaced by `true` | 289 passed, 0 failed | the probe on secp192k1, which openssl names and derx prints in dotted form, stops failing |
+| `agree()`'s three status and line-count checks deleted together | 289 passed, 0 failed | the probe on the empty file, where both programs print nothing, stops failing |
+| `agree()` stops adding to the element count | 289 passed, 0 failed | `1264 elements outside the trust store, floor 1000` becomes 0 |
+| `reject()`'s check on openssl's exit status deleted | 289 passed, 0 failed | the probe asserting a BER file as a shared refusal stops failing, which is the whole difference between `reject` and `stricter` |
+| `reject()`'s diagnostic check deleted | 289 passed, 0 failed | a stub that exits 1 in silence stops failing |
+| `reject()` accepts any nonzero status, not exactly 1 | 289 passed, 0 failed | a stub that exits 2 stops failing |
+| `sweep()`'s threshold raised from 2 to 200 | 289 passed, 0 failed | a stub that exits 86, which is what a sanitizer abort exits, stops failing |
+| `sweep()`'s empty-directory check deleted | 289 passed, 0 failed | the probe over an empty directory stops failing |
+| `certexts()`'s no-extension-compared check deleted | 289 passed, 0 failed | the probe over the hand-built v1, which carries no extension, stops failing |
+| section 8 deleted, the fourteen BER cases openssl accepts | 289 passed, 0 failed | `284 assertions above this line, expected 300` |
+| the oracle call in `agree()` replaced by `true` | 163 failures | the same 163, from the branch that refuses to compare against an oracle that printed nothing |
+| `certfields()`'s nine-field-lines check deleted | 39 failures | the same 39, from the field diff itself |
+
+The last two were already visible, and the second of them is worth naming
+for what it says about that check: deleting it does not let anything through,
+because the diff underneath fails anyway. What the check buys is the
+message, which names the `sed` that stopped matching instead of printing
+nine lines of difference.
+
+Eight survive, in two classes, and neither is a hole a harness can close
+from the inside.
+
+Three are `agree()`'s own guards taken one at a time: the check on derx's
+exit status, the check on openssl's, and the check that the oracle printed
+something. Each is masked by the other two and by the `cmp`, so no single
+deletion changes any verdict. The reason is specific and worth writing
+down: openssl prints `Error in encoding` on *stdout* for most of what it
+refuses, so for a malformed input the diff fails on its own. The empty file
+is the only input here where both programs print nothing at all, which makes
+it the only probe that can see those three checks missing, and it takes all
+three before it does. The branch for "openssl refused it and derx did not"
+cannot be reached by any input at all: it needs a file `derx` accepts and
+openssl rejects, and the fuzzer measures that set as empty over 10,000
+mutants.
+
+Five are floors and ceilings weakened: the corpus floor of 5,000 elements
+dropped to 0, the floor of 100 certificates dropped to 0,
+`basicConstraints`'s agreement floor dropped to 0, the fuzzer's
+`--min-compared` dropped from 250 to 0, and `handcert`'s check that `derx`
+can parse each template it builds. A floor that has been lowered cannot be
+caught by the run that passes it, since the measured value still clears it;
+what defends those is that every one of them prints its measured value next
+to the floor, so the number is in the output whether or not it is being
+judged. `handcert`'s self-check is the odd one out: it survives because all 40
+templates it builds parse today, and it is there for the next one that does
+not.
 
 Two numbers in the commit messages are wrong and are corrected here,
 not rewritten there. Commit 08 says twenty-eight mutations against the certificate

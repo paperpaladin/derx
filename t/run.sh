@@ -28,6 +28,10 @@ D=${1:-$ROOT/derx}
 T=$ROOT/t/tmp
 
 pass=0; fail=0; skip=0; elements=0
+# The trust store's share of $elements, kept apart so the fixtures' share can
+# be asserted on its own: 9,627 of the 10,891 come from /etc/ssl/certs and
+# move with whatever is installed there, where the rest are built here.
+celem=0
 
 ok()    { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
 bad()   { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"
@@ -511,9 +515,18 @@ certexts() {
 for c in rsa2048-sha256 rsa1024-sha1 rsa3072-sha512 ec256-sha256 ec384-sha384 \
          ec521-sha512 ed25519 longvalidity manyattrs dn-comma dn-spaces \
          dn-utf8 dn-multivalue ext-san ext-ku ext-leaf; do
-	[ -f "$T/$c.der" ] || continue
-	certfields "cert fields: $c" "$T/$c.der"
-	certexts   "cert extensions: $c" "$T/$c.der"
+	# A fixture openssl's generator refused is two assertions that never
+	# run, and `continue` left nothing behind to say so: the suite simply
+	# reported a smaller number. Counted as skips, so the assertion total
+	# at the bottom of this file holds on a machine whose openssl refuses
+	# an argument -- a 1024-bit key and SHA-1 are both candidates.
+	if [ -f "$T/$c.der" ]; then
+		certfields "cert fields: $c" "$T/$c.der"
+		certexts   "cert extensions: $c" "$T/$c.der"
+	else
+		skipt "cert fields: $c"     'the fixture was not generated'
+		skipt "cert extensions: $c" 'the fixture was not generated'
+	fi
 done
 
 # ---------------------------------------------------------------------------
@@ -893,7 +906,11 @@ certstricter 'cert: a NULL after the certificate' "$T/h-after.der"
 
 # `derx cert` on things that are DER but are not certificates.
 for f in csr rsakey pkcs8 eckey ecparam; do
-	[ -f "$T/$f.der" ] || continue
+	if [ ! -f "$T/$f.der" ]; then
+		skipt "cert: refuses a $f, which is DER but not a certificate" \
+		      'the fixture was not generated'
+		continue
+	fi
 	"$D" cert "$T/$f.der" >/dev/null 2>"$T/d.err"; s=$?
 	if [ "$s" -eq 1 ] && grep -q '^derx: ' "$T/d.err"; then
 		ok "cert: refuses a $f, which is DER but not a certificate"
@@ -1396,6 +1413,139 @@ if cmp -s "$T/byname.out" "$T/bypipe.out"; then
 else
 	bad 'stdin arriving one byte at a time reads the same' \
 	    "$(diff "$T/byname.out" "$T/bypipe.out")"
+fi
+
+# ===========================================================================
+# 11. the harness's own failure paths
+# ===========================================================================
+# Every assertion in this file is a function that can report a pass or a
+# failure, and a check that has never been seen to report a failure may be
+# checking nothing. These run the harness itself against inputs chosen to
+# make it fail, and assert that it does. `guard` runs an assertion in a
+# subshell, so its counters cannot reach the ones here, and requires its
+# output to begin with FAIL.
+#
+# This is the half of the planned harness mutation sweep that belongs in the
+# suite rather than in a record of one afternoon. Each guard below was
+# watched to go red by deleting the check it covers, and the check it covers
+# is named beside it.
+guard() { # guard NAME ASSERTION ARGS... -- the assertion must report a failure
+	_gn=$1; shift
+	_gout=$("$@" 2>&1)
+	case $_gout in
+	FAIL*) ok "harness: $_gn" ;;
+	*) bad "harness: $_gn" 'the assertion did not fail. It printed:' "$_gout" ;;
+	esac
+}
+
+# agree() must notice a differing value. secp192k1 is an OID openssl names
+# and derx prints in dotted form, which is the one disagreement this suite
+# can produce on demand: the missing-name gap the fuzzer counts, as a
+# fixture. Covers the cmp. If the OID table ever grows out of openssl's
+# objects.txt this needs another OID openssl knows and derx does not.
+openssl asn1parse -genstr OID:1.3.132.0.31 -out "$T/g-name.der" -noout 2>/dev/null
+guard 'agree fails on a differing OBJECT value' agree 'probe' "$T/g-name.der"
+# And must not read a shared refusal as an agreement. The input is the empty
+# file because it is the only one here that makes the comparison genuinely
+# vacuous: openssl prints "Error in encoding" on stdout for most of what it
+# refuses, so for a truncated element the diff fails on its own and says
+# nothing about agree()'s guards. On the empty file both programs print
+# nothing at all, and with the three status and line-count checks deleted
+# together agree() compares two empty files and reports a pass. Measured: any
+# one or two of the three can go without changing a verdict, and all three
+# together turn that probe green, which is what this guard is for.
+: > "$T/g-none.der"
+der "$T/g-short.der" 04 03 61 62
+guard 'agree fails when both programs refuse the input' agree 'probe' "$T/g-none.der"
+# reject() must notice derx accepting what was called malformed.
+der "$T/g-null.der" 05 00
+guard 'reject fails when derx accepts the input' reject 'probe' "$T/g-null.der"
+# And must notice the oracle's verdict. This file is BER that openssl reads,
+# so asserting it as a shared refusal has to fail: that check is the whole
+# difference between `reject` and `stricter`, and without it "openssl agrees
+# this is not DER" and "openssl reads it happily" are the same assertion.
+der "$T/g-ber.der" 04 81 05 68 65 6c 6c 6f
+guard 'reject fails when openssl accepts what is claimed as shared' \
+	reject 'probe' "$T/g-ber.der"
+# The same two directions for `derx cert`. h-after.der is a certificate with
+# a NULL after it, which openssl reads and derx refuses; h-nosec.der has a
+# UTCTime with no seconds, which both refuse.
+guard 'certreject fails when openssl accepts the certificate' \
+	certreject 'probe' "$T/h-after.der"
+guard 'certstricter fails when openssl refuses it too' \
+	certstricter 'probe' "$T/h-nosec.der"
+# certexts() must not pass over a certificate carrying none of the six
+# extensions it compares. h-base.der is the hand-built v1, which has no
+# extensions at all.
+guard 'certexts fails when no extension was compared' \
+	certexts 'probe' "$T/h-base.der"
+# sweep() the same, over a directory with nothing in it.
+mkdir -p "$T/g-empty"
+guard 'sweep fails on an empty directory' sweep 'probe' "$T/g-empty"
+
+# Three checks are about how the program under test behaves rather than about
+# any input, so no file can make them fail: that a refusal carries a
+# diagnostic, that exit 1 and exit 2 stay apart, and that the sweeps call
+# anything above 2 a defect. A mutation sweep over this file left all three
+# alive for that reason. They are falsifiable against a program that does
+# the wrong thing, so these three run the harness against a stub that is not
+# derx, named so nothing here can be read as an assertion about derx.
+with_stub() { # with_stub STUB ASSERTION ARGS... -- $D is the stub, in a subshell
+	D=$1; shift; "$@"
+}
+printf '#!/bin/sh\nexit 1\n' > "$T/g-quiet"
+printf '#!/bin/sh\necho "derx: refused" >&2\nexit 2\n' > "$T/g-exit2"
+printf '#!/bin/sh\nexit 86\n' > "$T/g-abort"
+chmod +x "$T/g-quiet" "$T/g-exit2" "$T/g-abort"
+guard 'reject fails on a refusal with no diagnostic' \
+	with_stub "$T/g-quiet" reject 'probe' "$T/g-short.der"
+# Exit 2 is "derx was invoked wrongly" and must never be read as "the input
+# was refused", which is the three-valued status the whole reject group rests
+# on. The stub prints a diagnostic, so only the status can fail it.
+guard 'reject fails on exit 2 where it wants exit 1' \
+	with_stub "$T/g-exit2" reject 'probe' "$T/g-short.der"
+# 86 is the sanitizer abort. Under `make test-asan` that is the difference
+# between a clean refusal and a heap overflow, and the sweeps are the only
+# thing that looks at it.
+mkdir -p "$T/g-two"; cp "$T/g-null.der" "$T/g-two/a"; cp "$T/g-null.der" "$T/g-two/b"
+guard 'sweep fails on a status above 2' \
+	with_stub "$T/g-abort" sweep 'probe' "$T/g-two"
+
+# ===========================================================================
+# 12. what this file itself ran
+# ===========================================================================
+# A block of assertions that stops running leaves nothing behind but a
+# smaller number. Breaking the sed that reads the OID table out of derx.c on
+# purpose took 69 assertions away and the run reported "219 passed, 0
+# failed": green, with nothing in the output saying that a group had stopped.
+#
+# So the count is asserted against a literal. It is a constant wherever this
+# suite can be green at all: every input is either built here or counted as a
+# skip when openssl's generator refuses it, and the trust-store groups add
+# assertions per group rather than per certificate, so a store of 100
+# certificates runs the same assertions as one of 150. Adding an assertion
+# means editing the number here, which is the point -- the README quotes it.
+#
+# The element total cannot be a literal the same way, since 9,627 of the
+# 10,891 come from whatever /etc/ssl/certs holds. The fixtures' share can:
+# it is $elements less the trust store's $celem, and a floor on that catches
+# agree() quietly stopping counting, which the total cannot, because the
+# trust store's 9,627 would still clear any floor worth setting.
+_ran=$((pass + fail + skip))
+if [ "$_ran" -ne 300 ]; then
+	bad 'every assertion this file contains ran' \
+	    "$_ran assertions above this line, expected 300" \
+	    'a group that stopped running is invisible in any other way'
+else
+	ok "assertions: $_ran above this line, the number this file expects"
+fi
+_fxel=$((elements - celem))
+if [ "$_fxel" -lt 1000 ]; then
+	bad 'the fixtures reached a byte-for-byte comparison' \
+	    "$_fxel elements outside the trust store, floor 1000" \
+	    "(total $elements, of which $celem is /etc/ssl/certs)"
+else
+	ok "elements: $_fxel from the fixtures, $celem from the trust store"
 fi
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"

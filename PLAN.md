@@ -325,14 +325,33 @@ file that is itself committed is always one behind.
       with any of them, so a cell right in the table and wrong in the code
       read as working. This is the same shape in the other direction, and the
       14 unexercised rows were the measure of it.
-- [ ] Mutation-test `t/run.sh` itself: break the harness, not the code
+- [x] Mutation-test `t/run.sh` itself: break the harness, not the code
       and confirm the breakage is visible.
+      done: 20 mutations over the whole file, one at a time, each run against
+      an unmodified `derx`. Ten of the twenty left the suite reporting 289
+      passed, 0 failed, the worst being the `cmp` in `agree()` replaced by
+      `true`: one word, and the diff this project is built on stopped running
+      while 163 assertions reported passes.
+      Twelve are killed now, by eleven assertions that run the harness
+      against an input or a stub program chosen to make it fail and require
+      it to fail, and by a count of the assertions the file ran compared
+      against a literal. Each of the eleven was watched to go red by deleting
+      the check it covers. The three stub guards exist because three checks
+      are about how the program under test behaves rather than about any
+      input, so no file can falsify them: that a refusal carries a
+      diagnostic, that exit 1 and exit 2 stay apart, and that a status above
+      2 is a defect rather than a refusal.
+      Eight survive and the README names them. Three are `agree()`'s own
+      guards taken one at a time, each masked by the other two, together
+      closing one hole that the empty file is the only input able to reach,
+      since openssl prints "Error in encoding" on stdout for most of what it
+      refuses. Five are floors and ceilings weakened, which the run that
+      passes them cannot see; all five print their measured value beside the
+      floor, which is the only defence available from inside.
       why: most of the defects recorded across these repositories were in a
-      test rig. Ten of this one's were. Two harness mutations have been run,
-      both against the new per-extension counts, and both found something:
-      deleting an extension from the oracle's list left the group reporting a
-      pass, and so did deleting the only fixture that exercises
-      `extendedKeyUsage`. The sweep over the rest of the file is still to do.
+      test rig. Ten of this one's were, and the sweep found a eleventh and a
+      twelfth: an oracle that can be disconnected in silence, and an element
+      count that can stop counting.
 - [ ] Size `print_name()`'s attribute array to what was actually decoded,
       behind a build flag, with the suite run both ways.
       why: `Atv a[256]` holds at most five attributes for anything here, and a
