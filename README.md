@@ -42,12 +42,12 @@ the value formats are openssl's, down to the trailing blanks on a line with no
 value, so there is no normalisation step in the middle that could be wrong in
 a way that hides a disagreement.
 
-Currently **10,944 DER elements** compare identically, of which 9,627 come
+Currently **13,034 DER elements** compare identically, of which 9,627 come
 from the 150 distinct certificates in `/etc/ssl/certs`.
 
 Those are fixed inputs. `t/fuzz.py` is the same diff against inputs nobody
 chose: it mutates the corpus and runs both programs over every mutant. At the
-seed and count `make test` uses, 600 mutants, around 375 of them are parsed by
+seed and count `make test` uses, 600 mutants, around 371 of them are parsed by
 both programs and compared, and the count that reached a comparison is
 asserted, not just the count that differed. A run where every mutant was
 refused before parsing has compared nothing and must not report a pass.
@@ -165,8 +165,8 @@ ok    constructed OCTET STRING (BER segmenting)
 ok    truncation sweep: every prefix of a certificate (508 inputs)
 ok    single-byte corruption sweep: 00 and FF at every offset (1016 inputs)
 ok    differential fuzzer, 600 mutants
-      | fuzz: 377 compared and agreed, 0 mismatched, 5 differed only in an
-      | OID name, 83 refused by derx alone, 135 refused by both, 0 accepted
+      | fuzz: 371 compared and agreed, 0 mismatched, 5 differed only in an
+      | OID name, 83 refused by derx alone, 141 refused by both, 0 accepted
       | by derx alone, 0 crashed, 0 undiagnosed
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
@@ -181,11 +181,11 @@ ok    harness: sweep fails on an empty directory
 ok    harness: reject fails on a refusal with no diagnostic
 ok    harness: reject fails on exit 2 where it wants exit 1
 ok    harness: sweep fails on a status above 2
-ok    assertions: 334 above this line, the number this file expects
-ok    elements: 1317 from the fixtures, 9627 from the trust store
+ok    assertions: 336 above this line, the number this file expects
+ok    elements: 3407 from the fixtures, 9627 from the trust store
 
-336 passed, 0 failed, 0 skipped
-10944 DER elements compared against openssl asn1parse
+338 passed, 0 failed, 0 skipped
+13034 DER elements compared against openssl asn1parse
 ```
 
 The last thirteen lines are the suite checking itself. Eleven of them run an
@@ -200,23 +200,36 @@ whatever is in `/etc/ssl/certs`, so the share that moves with the machine is
 visible and the share that does not can have a floor. Both are in
 [Breaking the harness on purpose](#breaking-the-harness-on-purpose).
 
-`make test` depends on `make overread`, which is the sanitizer gate on
-`slurp()` and prints one line of its own above the suite:
+`make test` depends on `make overread`, which is the sanitizer gate on the two
+places in the program where a buffer could be larger than its contents. It
+prints two lines of its own above the suite:
 
 ```
 ok    overread: ASan sees the planted read one byte past the file
+ok    overread: ASan sees the planted read past the attribute array
 ```
 
-It builds a second binary with `-DDERX_OVERREAD`, which reads `b[n]`, one byte
-past the end of the input buffer, and the target fails unless ASan reports a
-`heap-buffer-overflow` and the process exits 86. `derx` itself exits 0, 1 or 2
-and nothing else, so 86 cannot be read as a refusal, a usage error or a crash.
-Everything it builds lives in a fresh `mktemp -d` and is removed, so it leaves
-nothing in the tree.
+Each builds a binary with a deliberate read compiled in and fails unless ASan
+reports it and the process exits 86. `derx` itself exits 0, 1 or 2 and nothing
+else, so 86 cannot be read as a refusal, a usage error or a crash.
+`-DDERX_OVERREAD` reads `b[n]`, one byte past the end of the input buffer, and
+wants a `heap-buffer-overflow`. `-DDERX_OVERREAD_ATV` reads `a[na]` in
+`print_name()`, one past the attributes a certificate's name actually carried,
+and wants a `dynamic-stack-buffer-overflow`, which is a different class and is
+asked for by name rather than as "some error happened". Everything either one
+builds lives in a fresh `mktemp -d` and is removed, so nothing is left in the
+tree.
+
+The gate asks ASan alone on purpose. With `-fsanitize=undefined` as well,
+UBSan reaches both plants first and halts on its own message, so the target
+would be asserting a string from the wrong instrument. That second message is
+worth knowing though: sizing the array to the count is also what gives UBSan a
+bound to check, so it reports `index 1 out of bounds for type Atv [*]` where
+the fixed array gave it nothing to say.
 
 The gate exists because nothing else in the suite can see the property. With
 the `realloc` down to the file's exact size removed from `slurp()`, the whole
-suite reports `336 passed, 0 failed` and `make test-asan` reports the same,
+suite reports `338 passed, 0 failed` and `make test-asan` reports the same,
 while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
@@ -271,7 +284,10 @@ Every expected value comes from it, so without it the suite would be comparing
   Ten stack arrays remain, each bounded by a guard that calls `die()`, and a
   planted read one past the end of one of them is reported as a
   `stack-buffer-overflow` with a line number, measured rather than assumed.
-  The one exception is in "Where the tests are still weak" below.
+  The eleventh was `print_name()`'s attribute array, the one place no
+  allocation size could reach, and it is sized to the name that was decoded
+  now rather than to a fixed 256, with a probe of its own in
+  `make overread`.
 
 ## What does not work
 
@@ -434,7 +450,7 @@ with, and it says so.
 
 ### What derx refuses that openssl accepts
 
-Thirty-nine cases in `derx parse` and five more in `derx cert`. DER is a
+Thirty-nine cases in `derx parse` and six more in `derx cert`. DER is a
 subset of BER and openssl reads BER, so each of these is a second encoding of
 a value that DER already has one encoding for. Each one is asserted in the
 suite *including openssl's exit 0*, so the divergence is measured, not
@@ -461,6 +477,7 @@ row each in the table below:
 | `critical FALSE` encoded explicitly | read as not critical | refused |
 | a modulus with two leading zero bytes | padding ignored | refused |
 | a NULL after the certificate | first object taken | refused |
+| a name with more than 256 attributes | read | refused by name |
 
 The last group is the one worth defending. `derx` is narrower than openssl
 about distinguished names on purpose: it never prints a name openssl would have
@@ -518,23 +535,32 @@ something, that is the safe direction.
   computes `(n-1)*8 + 0`, because the bit-counting loop contributes nothing for
   a zero top byte. The two differ only on a second pad byte, which X.690 8.3.2
   forbids and which `int_check()` refuses before `int_bits()` ever runs.
-- One buffer in the program is declared far larger than what goes in it and
-  no sanitizer can see inside it. `print_name()` holds the flattened
-  attributes of a distinguished name in `Atv a[256]`, and the certificates
-  here use at most five, so 251 slots are untouched on every call. A read at
-  `a[na]`, one past the attributes that were actually decoded, was planted and
-  built with `-fsanitize=address,undefined`: no diagnostic of any kind, and
-  the program exited 0. It is inside the array, so there is no redzone to
-  cross.
+- The buffer that was larger than its contents is fixed, and this entry stays
+  because of what it took to see. `print_name()` held the flattened
+  attributes of a distinguished name in `Atv a[256]` where the certificates
+  here use at most five, so a read at `a[na]`, one past the attributes
+  actually decoded, never left the array: planted and built with
+  `-fsanitize=address,undefined` it produced no diagnostic of any kind and
+  the program exited 0. There was no redzone to cross. It was never a live
+  defect, since every write is guarded and the printing loop runs from
+  `na - 1` down, and that is exactly why nothing could find it.
 
-  Not a live defect. Every write is guarded by `na == MAXATV` and the printing
-  loop runs from `na - 1` down, so nothing reads an untouched slot today. It is
-  recorded because it is the one place in `derx.c` that no allocation size can
-  reach: the bytes of the input stay in `slurp()`'s buffer, which is exact, and
-  this array holds already-decoded headers rather than input. The fix, if it is
-  worth making, is the one `jsonc` uses, an exactly-sized allocation behind a
-  build flag with the suite run both ways, and it needs a counting pass over
-  the attributes first. It is in `PLAN.md`.
+  `print_name()` walks the name twice now, once to count the attributes and
+  once to fill an array sized to that count. The same planted read is a
+  `dynamic-stack-buffer-overflow` with a line number, and `make overread`
+  plants it on every `make test`. No build flag and no second configuration,
+  which is where this differs from `jsonc`'s arena: there was no speed to
+  protect, so there is one path rather than two.
+
+  Two things that did not move, both measured. With the array put back to
+  `Atv a[256]`, `make test` and `make test-asan` both still report `338
+  passed, 0 failed`, and `make overread` is the only thing that fails. And the
+  bound itself had never been reached by any input. `MAXATV` is what keeps the
+  length of that array off the certificate, and with a counting pass it is the
+  certificate that proposes the length, so there is a fixture now with 257
+  attributes in its subject: openssl generates it and reads it, `derx cert`
+  refuses it by name, and deleting the bound turns that one assertion red
+  where nothing would have noticed before.
 
 - No oracle for an unknown attribute type with a non-string value. openssl
   dumps it as hex and `derx` refuses it; a *known* attribute type with a string
@@ -641,7 +667,7 @@ in the code. Ten of this one's were:
 9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
    was corrected on 18 October and the correction was written up here and in
    `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
-   the whole suite reporting `336 passed, 0 failed`, under the sanitizers as
+   the whole suite reporting `338 passed, 0 failed`, under the sanitizers as
    well as without them. `make overread` is the only thing that notices, and
    it is a dependency of `make test` rather than a target somebody has to
    remember, because two repositories in this collection had the target and
@@ -695,7 +721,7 @@ somewhere else. The old numbers are worth writing down beside them:
 | `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
 | the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
 | `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
-| the `realloc` down to the exact file size removed from `slurp()` | `336 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+| the `realloc` down to the exact file size removed from `slurp()` | `338 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
 
 The fourth row found a defect in the replacement rather than in `derx`. Once
 the thresholds moved out of the aggregate assertion it was left printing
@@ -737,6 +763,18 @@ The one survivor of the earlier sweeps was re-measured rather than quoted:
 deleting the leading-zero scan from `int_bits()` still leaves every
 assertion in the suite green. No count is given, because that one moves with
 every commit and the claim does not.
+
+Three were applied against the attribute array, all killed, and the first
+two are a pair worth reading together. Putting the array back to `Atv a[256]`
+leaves `make test` and `make test-asan` both at `338 passed, 0 failed` with
+`make overread` the only thing that fails, which is the same shape as the
+`slurp()` row above: the gate is the only witness. Deleting the `MAXATV`
+bound, which is what keeps the array's length off the certificate now that it
+is sized by a counting pass, fails the new 257-attribute assertion and
+nothing else, and would have failed nothing at all a commit ago. And
+compiling the planted read with `-fsanitize=address,undefined` against the
+fixed array produced no diagnostic from either sanitizer, measured with the
+same probe the gate uses rather than with a separate experiment.
 
 Three more were applied against the form rules, all killed and each at the
 resolution it should have. Dropping one term from `prim_only` fails exactly
@@ -835,7 +873,7 @@ the sweep forced", the same fact told twice and counted once.
 
 ## Design
 
-One file, `derx.c`, 1363 lines, 354 of them comment-only: 28% of the non-blank
+One file, `derx.c`, 1392 lines, 372 of them comment-only: 28% of the non-blank
 lines, not the "well over half" this used to claim, explaining why openssl
 does something rather than what the code does.
 

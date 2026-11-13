@@ -25,27 +25,69 @@ test: derx overread
 # or a segfault. The fixture is the two bytes 05 00, a DER NULL, which makes
 # the exact allocation two bytes long and b[2] one past the end of it.
 #
+# The second probe is the same idea for the only other place in derx.c where
+# a buffer could be larger than its data. print_name() held the flattened
+# attributes of a distinguished name in `Atv a[256]` and the certificates
+# here use at most five, so a read at a[na] stayed inside the array:
+# measured with this exact probe, ASan and UBSan both reported nothing and
+# the process exited 0. The array is sized to the counting pass now, and the
+# same read is a dynamic-stack-buffer-overflow. That is a different ASan
+# class from the first probe, so the two are checked for different strings
+# rather than for "an error happened".
+#
 # Everything goes in a fresh mkdtemp. t/tmp is a fixed path that t/run.sh
 # deletes on startup, so putting the probe binary there would mean two
 # concurrent runs destroying each other.
+# ASan alone, deliberately. With -fsanitize=undefined as well, UBSan reaches
+# both plants first and halts on its own message, so the gate would be
+# asserting a string from the wrong instrument: `load of address ... with
+# insufficient space` for the first and `index 1 out of bounds for type
+# Atv [*]` for the second. That second one is worth knowing, since sizing the
+# array to the count is also what gives UBSan a bound to check, so the fix
+# is visible to two instruments where the fixed array was visible to neither.
+# What this target is for is the memory the sanitizer can see, so it asks
+# ASan and names the class it expects.
+SANBUILD = $(CC) -std=c11 -g -O1 -fsanitize=address \
+	-fno-omit-frame-pointer -ffile-prefix-map=$(CURDIR)=. \
+	-Wall -Wextra -Wpedantic
+PROBEOPT = ASAN_OPTIONS=exitcode=86
+
 overread: derx.c
-	@W=$$(mktemp -d) || exit 1; \
-	$(CC) -std=c11 -g -O1 -fsanitize=address -fno-omit-frame-pointer \
-		-ffile-prefix-map=$(CURDIR)=. -DDERX_OVERREAD \
-		-Wall -Wextra -Wpedantic -o "$$W/derx-overread" derx.c || \
+	@W=$$(mktemp -d) || exit 1; bad=0; \
+	$(SANBUILD) -DDERX_OVERREAD -o "$$W/p1" derx.c || \
 		{ rm -rf "$$W"; exit 1; }; \
 	printf '\005\000' > "$$W/null.der"; \
-	ASAN_OPTIONS=exitcode=86 "$$W/derx-overread" parse "$$W/null.der" \
-		> /dev/null 2> "$$W/log"; s=$$?; \
-	if [ $$s -eq 86 ] && grep -q heap-buffer-overflow "$$W/log"; then \
+	$(PROBEOPT) "$$W/p1" parse "$$W/null.der" > /dev/null 2> "$$W/log1"; \
+	s=$$?; \
+	if [ $$s -eq 86 ] && grep -q heap-buffer-overflow "$$W/log1"; then \
 		echo "ok    overread: ASan sees the planted read one byte past the file"; \
-		rm -rf "$$W"; \
 	else \
 		echo "FAIL  overread: exit $$s, no heap-buffer-overflow reported."; \
 		echo "      slurp() is over-allocating again, and every ASan run"; \
 		echo "      in this suite is blind past the end of the input."; \
-		sed 's/^/      | /' "$$W/log"; rm -rf "$$W"; exit 1; \
-	fi
+		sed 's/^/      | /' "$$W/log1"; bad=1; \
+	fi; \
+	$(SANBUILD) -DDERX_OVERREAD_ATV -o "$$W/p2" derx.c || \
+		{ rm -rf "$$W"; exit 1; }; \
+	if openssl req -x509 -nodes -newkey rsa:2048 -keyout "$$W/k" \
+	     -subj '/CN=x' -outform DER -out "$$W/c.der" > /dev/null 2>&1; then \
+		$(PROBEOPT) "$$W/p2" cert "$$W/c.der" > /dev/null 2> "$$W/log2"; \
+		s=$$?; \
+		if [ $$s -eq 86 ] && \
+		   grep -q dynamic-stack-buffer-overflow "$$W/log2"; then \
+			echo "ok    overread: ASan sees the planted read past the attribute array"; \
+		else \
+			echo "FAIL  overread: exit $$s, no dynamic-stack-buffer-overflow."; \
+			echo "      print_name()'s array is larger than the name again,"; \
+			echo "      and a read past the decoded attributes is invisible."; \
+			sed 's/^/      | /' "$$W/log2"; bad=1; \
+		fi; \
+	else \
+		echo "FAIL  overread: openssl would not generate a certificate,"; \
+		echo "      so the attribute-array probe had no input to read."; \
+		bad=1; \
+	fi; \
+	rm -rf "$$W"; exit $$bad
 
 # A DER reader parses hostile bytes by definition, so the same suite has to
 # pass with the sanitizers on. Separate binary so `make test` stays fast.

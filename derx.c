@@ -834,10 +834,12 @@ static void put_dstring(const uint8_t *p, size_t n, unsigned tag) {
 
 /* ---------------------------------------------------------------- names */
 
-/* shortcut: a flat array, so a distinguished name with more than 256
- * attributes is refused by name rather than printed. RFC 5280 puts no bound
- * on it; the certificates on this machine use at most five. Growing it means
- * a realloc, or two passes over the same bytes to count first. */
+/* shortcut: a distinguished name with more than 256 attributes is refused by
+ * name rather than printed. RFC 5280 puts no bound on it; the certificates on
+ * this machine use at most five. MAXATV is only that refusal threshold now:
+ * the array itself is sized to the attributes the name actually holds, by the
+ * counting pass below, which is the upgrade path this comment used to name as
+ * future work. Lifting the refusal means a growable array. */
 #define MAXATV 256
 typedef struct { int set; Hdr type, val; } Atv;
 
@@ -856,11 +858,23 @@ typedef struct { int set; Hdr type, val; } Atv;
  * for a known type whose value is not one of the seven string types openssl
  * will convert.
  */
-static void print_name(const Rd *outer, const Hdr *nh, const char *what) {
-	Atv a[MAXATV];
+/*
+ * One walk over the name, used twice. With `a` NULL it counts the attributes
+ * and stores nothing; with `a` non-NULL it fills it. The count has to come
+ * first because the array is sized to it, and it is sized to it because a
+ * fixed array larger than its contents is the one shape no sanitizer can
+ * see: a read at a[na] inside `Atv a[256]` never leaves the array, and a
+ * planted one produced no diagnostic from ASan or UBSan and exited 0. Sized
+ * to the count, the same read is a dynamic-stack-buffer-overflow with a line
+ * number, which `make overread` plants and requires.
+ *
+ * The cost is decoding the same bytes twice. Nothing is cached between the
+ * passes on purpose: the second pass has to be able to die exactly where the
+ * first one would, and a name is at most a few hundred bytes.
+ */
+static int name_walk(const Rd *outer, const Hdr *nh, const char *what, Atv *a) {
 	int na = 0, set = 0;
 	Rd seqr = rd_in(outer, nh);
-	expect(nh, CLS_UNIV, 16, 1, what);
 	while (rd_more(&seqr)) {
 		Hdr rdn = rd_next(&seqr, what);
 		expect(&rdn, CLS_UNIV, 17, 1, "relative distinguished name");
@@ -871,15 +885,30 @@ static void print_name(const Rd *outer, const Hdr *nh, const char *what) {
 			expect(&atv, CLS_UNIV, 16, 1, "attribute");
 			Rd ar = rd_in(&setr, &atv);
 			if (na == MAXATV) die("%s: more than %d attributes", what, MAXATV);
-			a[na].set = set;
-			a[na].type = rd_next(&ar, "attribute type");
-			a[na].val = rd_next(&ar, "attribute value");
-			rd_end(&ar, "attribute");
+			if (a != NULL) {
+				a[na].set = set;
+				a[na].type = rd_next(&ar, "attribute type");
+				a[na].val = rd_next(&ar, "attribute value");
+				rd_end(&ar, "attribute");
+			}
 			na++;
 		}
 		set++;
 	}
+	return na;
+}
+
+static void print_name(const Rd *outer, const Hdr *nh, const char *what) {
+	expect(nh, CLS_UNIV, 16, 1, what);
+	int na = name_walk(outer, nh, what, NULL);
 	if (na == 0) die("%s: empty name", what);
+	Atv a[na];
+	name_walk(outer, nh, what, a);
+#ifdef DERX_OVERREAD_ATV
+	/* A read one past the attributes that were actually decoded, for the
+	 * `make overread` gate. Inside `Atv a[MAXATV]` this was invisible. */
+	fprintf(stderr, "derx: atv probe read %d\n", a[na].set);
+#endif
 
 	for (int i = na - 1; i >= 0; i--) {
 		char txt[OIDTEXTMAX];

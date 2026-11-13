@@ -58,9 +58,10 @@ Three halves, and the second is the one that costs the most to get wrong:
    the buffer down to the file's exact size for this to mean anything: while
    it over-allocated 64 KiB, a read past the end of a 1 KiB certificate was
    inside a live allocation and ASan saw nothing. `make overread`, a dependency
-   of `make test`, is what holds that: it plants the read and fails unless ASan
-   reports it. With the `realloc` removed, every other assertion in the suite
-   still passes, sanitizers and all.
+   of `make test`, is what holds that: it plants two reads, one past the input
+   buffer and one past `print_name()`'s attribute array, and fails unless ASan
+   reports each of them by its own class. With either fix removed, every other
+   assertion in the suite still passes, sanitizers and all.
 2. Agreement, not resemblance. For valid DER, `derx parse` output equals
    `openssl asn1parse -i` byte for byte. Not "looks like", not "contains the
    same facts": equal, as `cmp` sees it. A single differing space anywhere
@@ -110,8 +111,8 @@ read, because everything downstream of it believes it.
    multi-valued RDN, SAN/EKU/basicConstraints, plus a PKCS#10 request, a
    PKCS#1 key, a PKCS#8 PrivateKeyInfo, an EC key and bare EC parameters.
    Weaker than 1 because I chose the arguments.
-6. openssl's acceptance of inputs we refuse. Forty-four cases where openssl
-   reads BER that is not DER, 25 of them one tag each in the wrong form. Asserting openssl's exit 0 is what keeps
+6. openssl's acceptance of inputs we refuse. Forty-five cases where openssl
+   reads what derx will not, 25 of them one tag each in the wrong form. Asserting openssl's exit 0 is what keeps
    "openssl is more permissive here" a measurement, not a claim.
 7. Hand-built DER. The weakest of the openssl-backed groups, because I
    wrote the bytes, but openssl still judges the output, and this is the only
@@ -382,17 +383,46 @@ file that is itself committed is always one behind.
       piece of data in `derx.c` that the suite was not driving. The suite
       reached 1 of the 25 bits, the constructed OCTET STRING, so a mask
       written wrong in 24 places would have read as working.
-- [ ] Size `print_name()`'s attribute array to what was actually decoded,
-      behind a build flag, with the suite run both ways.
-      why: `Atv a[256]` holds at most five attributes for anything here, and a
-      planted read at `a[na]` produces no diagnostic from ASan or UBSan and
-      exits 0, because it is inside the array. This is the one place in
-      `derx.c` that no allocation size reaches and the only survivor of the
-      buffer sweep. Not a live defect: every write is guarded by
-      `na == MAXATV` and the printing loop runs from `na - 1` down. It needs a
-      counting pass over the attributes before the array exists, which is the
-      `shortcut:` comment's own upgrade path, and `jsonc` has the pattern for
-      the flag and the two runs.
+- [x] A fixture for a version 1 certificate carrying an extension, and the
+      two places GnuTLS reads these bytes differently.
+      done: `certlint`, a sibling with OpenSSL and GnuTLS as oracles, records
+      seven contradictions between them; two are about bytes `derx` reads and
+      both were re-measured here. A v1 certificate with an extension is read
+      by openssl and by `derx`, which prints version=1 and the extension, and
+      refused outright by `certtool` with an import error. A P-521 key is 521
+      bits to openssl and 528 to `certtool`, under a differently named
+      heading. `derx` follows openssl in both because openssl is its declared
+      authority; the README records the disagreement and does not settle it.
+      The fixture was the missing part: the v1-plus-extension shape had no
+      test at all, so the behaviour was undocumented as well as unasserted.
+      why: a suite with one oracle cannot say which of two oracles is right,
+      and picking the one that makes `derx` correct would be choosing the
+      answer first. What it can do is name the choice and test the shape.
+- [x] Size `print_name()`'s attribute array to what was actually decoded.
+      done: `print_name()` walks the name twice, once to count the attributes
+      and once to fill an array sized to that count, through one function
+      called with a null array for the counting pass so that both passes
+      validate identically. The planted read at `a[na]` is a
+      `dynamic-stack-buffer-overflow` where it used to be invisible, and
+      `make overread` has a second probe for it, run by `make test`.
+      No build flag, which is where this deviates from the item as written:
+      `jsonc` needs one because its arena is there for speed, and there is no
+      speed here to protect, so two configurations would have been two code
+      paths to keep in step for nothing. Watched red by putting the array
+      back to `Atv a[256]`: `make test` and `make test-asan` both still
+      report 338 passed, 0 failed and the gate is the only thing that fails.
+      The bound turned out to matter more than before and to be untested.
+      `MAXATV` is what keeps the array's length off the input, and with a
+      counting pass the certificate proposes that length, so a fixture now
+      carries 257 attributes in its subject: openssl generates and reads it,
+      `derx cert` refuses it by name, `derx parse` agrees with asn1parse over
+      all 2090 of its elements, and deleting the bound turns that assertion
+      red where nothing in the suite would have noticed.
+      why: `Atv a[256]` held at most five attributes for anything here, and a
+      planted read at `a[na]` produced no diagnostic from ASan or UBSan and
+      exited 0, because it was inside the array. It was the one place in
+      `derx.c` that no allocation size reached and the only survivor of the
+      buffer sweep.
 
 ### Milestone 2: the extensions that are names only
 

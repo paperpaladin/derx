@@ -955,6 +955,28 @@ der "$T/nullel" 05 00
 cat "$T/nullel" >> "$T/h-after.der"
 certstricter 'cert: a NULL after the certificate' "$T/h-after.der"
 
+# A distinguished name with more attributes than MAXATV, which derx refuses
+# by name rather than printing. openssl reads it, so this is a place derx is
+# stricter, and it is the only input anywhere that reaches the bound.
+# print_name() sizes its array to a counting pass over the name now, so the
+# bound is what keeps the length of that array off the input: without it a
+# certificate decides how much stack derx asks for. 257 attributes is one
+# past it; the structural reader has no opinion about how many there are, so
+# the same file is an agreement for `derx parse`.
+manysubj=''
+i=0
+while [ "$i" -lt 257 ]; do manysubj="$manysubj/CN=a"; i=$((i + 1)); done
+if openssl req -x509 -nodes -newkey rsa:2048 -keyout "$T/many.key" \
+     -subj "$manysubj" -outform DER -out "$T/many.der" >/dev/null 2>&1; then
+	agree        'a name with 257 attributes parses' "$T/many.der"
+	certstricter 'cert: a name with more attributes than derx will hold' \
+		"$T/many.der"
+else
+	skipt 'a name with 257 attributes parses' 'openssl req refused the subject'
+	skipt 'cert: a name with more attributes than derx will hold' \
+	      'openssl req refused the subject'
+fi
+
 # `derx cert` on things that are DER but are not certificates.
 for f in csr rsakey pkcs8 eckey ecparam; do
 	if [ ! -f "$T/$f.der" ]; then
@@ -1583,9 +1605,9 @@ guard 'sweep fails on a status above 2' \
 # agree() quietly stopping counting, which the total cannot, because the
 # trust store's 9,627 would still clear any floor worth setting.
 _ran=$((pass + fail + skip))
-if [ "$_ran" -ne 334 ]; then
+if [ "$_ran" -ne 336 ]; then
 	bad 'every assertion this file contains ran' \
-	    "$_ran assertions above this line, expected 334" \
+	    "$_ran assertions above this line, expected 336" \
 	    'a group that stopped running is invisible in any other way'
 else
 	ok "assertions: $_ran above this line, the number this file expects"
