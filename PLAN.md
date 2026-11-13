@@ -439,8 +439,20 @@ file that is itself committed is always one behind.
       name already has, so it is cheap once the multi-line form exists.
 - [ ] The remaining five GeneralName kinds, starting with `directoryName`.
       why: one corpus certificate has a `DirName` in its subjectAltName and
-      that makes the whole value decline. `directoryName` reuses the existing
-      distinguished-name renderer; the other four do not and may stay out.
+      that makes the whole value decline. The other four may stay out.
+      This item used to say `directoryName` reuses the existing
+      distinguished-name renderer, and that is wrong. Measured: `openssl
+      x509 -ext subjectAltName` on `Izenpe.com` prints
+      `DirName:/O=IZENPE S.A. ... /street=Avda del Mediterraneo ...`, which
+      is the slash-separated oneline form with attributes in encoding order,
+      not the RFC 2253 form `derx` prints for an issuer or a subject. So this
+      needs a second name renderer with its own escaping rules, and the only
+      input exercising them anywhere is that one certificate, which is thin
+      ground for guessing how openssl escapes the rest. Either generate
+      fixtures for the escapes first, through a config file with a dirName
+      section, or decode only the values that need no escaping and keep
+      declining the others, which is a decline with a reason rather than a
+      decline for want of a decoder.
 - [ ] Name constraints, policy constraints, inhibit anyPolicy, private key
       usage period.
       why: all four are short and all four have a single-line openssl
