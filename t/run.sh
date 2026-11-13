@@ -875,6 +875,23 @@ HC_EXTS='30 0d 06 04 2a 03 04 05 04 05 30 03 01 01 ff'
 handcert "$T/h-extunknown.der" 13 01 78
 certfields 'cert fields: an extension openssl cannot name either' \
 	"$T/h-extunknown.der"
+# A version 1 certificate carrying an extension, which is the one place in
+# this suite where two readers of the same bytes disagree. RFC 5280 4.1.2.1
+# requires version 3 for extensions. openssl reads this file and prints it as
+# version 1 with the key usage; GnuTLS certtool refuses it outright with
+# "import error: Error in the certificate"; certlint, a sibling repository
+# that has both as oracles, refuses it at its parser. derx follows openssl,
+# because openssl is this project's declared authority, and that is a fact
+# about this repository rather than evidence about which reading is right.
+# README.md records the disagreement instead of settling it.
+HC_VERFIELD=''
+HC_EXTS='30 0b 06 03 55 1d 0f 04 04 03 02 01 86'
+handcert "$T/h-v1ext.der" 13 01 78
+agree      'version 1 carrying an extension parses'          "$T/h-v1ext.der"
+certfields 'cert fields: version 1 carrying an extension'     "$T/h-v1ext.der"
+certexts   'cert extensions: an extension in a version 1 certificate' \
+	"$T/h-v1ext.der"
+HC_VERFIELD='a0 03 02 01 02'
 HC_EXTS=''
 
 # The two obsolete unique identifiers, which derx skips rather than prints.
@@ -1108,7 +1125,7 @@ fi
 # floor would be weaker than an equality for no gain, and any edit that drops
 # a fixture has to come here and say so.
 fxexp_basicConstraints=16
-fxexp_keyUsage=6
+fxexp_keyUsage=7
 fxexp_extendedKeyUsage=1
 fxexp_subjectKeyIdentifier=16
 fxexp_authorityKeyIdentifier=16
@@ -1566,9 +1583,9 @@ guard 'sweep fails on a status above 2' \
 # agree() quietly stopping counting, which the total cannot, because the
 # trust store's 9,627 would still clear any floor worth setting.
 _ran=$((pass + fail + skip))
-if [ "$_ran" -ne 331 ]; then
+if [ "$_ran" -ne 334 ]; then
 	bad 'every assertion this file contains ran' \
-	    "$_ran assertions above this line, expected 331" \
+	    "$_ran assertions above this line, expected 334" \
 	    'a group that stopped running is invisible in any other way'
 else
 	ok "assertions: $_ran above this line, the number this file expects"

@@ -42,12 +42,12 @@ the value formats are openssl's, down to the trailing blanks on a line with no
 value, so there is no normalisation step in the middle that could be wrong in
 a way that hides a disagreement.
 
-Currently **10,903 DER elements** compare identically, of which 9,627 come
+Currently **10,944 DER elements** compare identically, of which 9,627 come
 from the 150 distinct certificates in `/etc/ssl/certs`.
 
 Those are fixed inputs. `t/fuzz.py` is the same diff against inputs nobody
 chose: it mutates the corpus and runs both programs over every mutant. At the
-seed and count `make test` uses, 600 mutants, around 373 of them are parsed by
+seed and count `make test` uses, 600 mutants, around 375 of them are parsed by
 both programs and compared, and the count that reached a comparison is
 asserted, not just the count that differed. A run where every mutant was
 refused before parsing has compared nothing and must not report a pass.
@@ -145,11 +145,12 @@ ok    cert fields: hand-built v1, unknown attribute OID, 16-bit key
 ok    cert fields: T61String byte 0xC1 is Latin-1, not T.61
 ok    cert fields: UTCTime 49 is 2049 and 50 is 1950
 ok    cert fields: key usage with a nonzero unused bit
+ok    cert fields: version 1 carrying an extension
 ok    cert fields: issuerUniqueID and subjectUniqueID are skipped
 ok    cert fields: 150 certificates, 9 fields and every extension name
 ok    cert extension values: 483 compared, 0 disagreed with openssl
       basicConstraints         trust store: 150 agree, 0 declined (floor 120, 0)  fixtures: 16
-      keyUsage                 trust store: 147 agree, 0 declined (floor 120, 0)  fixtures: 6
+      keyUsage                 trust store: 147 agree, 0 declined (floor 120, 0)  fixtures: 7
       extendedKeyUsage         trust store:   0 agree, 0 declined (floor 0, 0)  fixtures: 1
       subjectKeyIdentifier     trust store: 149 agree, 0 declined (floor 120, 0)  fixtures: 16
       authorityKeyIdentifier   trust store:  29 agree, 5 declined (floor 15, 15)  fixtures: 16
@@ -164,8 +165,8 @@ ok    constructed OCTET STRING (BER segmenting)
 ok    truncation sweep: every prefix of a certificate (508 inputs)
 ok    single-byte corruption sweep: 00 and FF at every offset (1016 inputs)
 ok    differential fuzzer, 600 mutants
-      | fuzz: 373 compared and agreed, 0 mismatched, 4 differed only in an
-      | OID name, 86 refused by derx alone, 137 refused by both, 0 accepted
+      | fuzz: 377 compared and agreed, 0 mismatched, 5 differed only in an
+      | OID name, 83 refused by derx alone, 135 refused by both, 0 accepted
       | by derx alone, 0 crashed, 0 undiagnosed
 ok    fuzzer: mutant i is a pure function of (seed, i)
 ok    stdin arriving one byte at a time reads the same
@@ -180,11 +181,11 @@ ok    harness: sweep fails on an empty directory
 ok    harness: reject fails on a refusal with no diagnostic
 ok    harness: reject fails on exit 2 where it wants exit 1
 ok    harness: sweep fails on a status above 2
-ok    assertions: 331 above this line, the number this file expects
-ok    elements: 1276 from the fixtures, 9627 from the trust store
+ok    assertions: 334 above this line, the number this file expects
+ok    elements: 1317 from the fixtures, 9627 from the trust store
 
-333 passed, 0 failed, 0 skipped
-10903 DER elements compared against openssl asn1parse
+336 passed, 0 failed, 0 skipped
+10944 DER elements compared against openssl asn1parse
 ```
 
 The last thirteen lines are the suite checking itself. Eleven of them run an
@@ -215,7 +216,7 @@ nothing in the tree.
 
 The gate exists because nothing else in the suite can see the property. With
 the `realloc` down to the file's exact size removed from `slurp()`, the whole
-suite reports `333 passed, 0 failed` and `make test-asan` reports the same,
+suite reports `336 passed, 0 failed` and `make test-asan` reports the same,
 while `make overread` fails with `exit 0, no heap-buffer-overflow reported`.
 Both numbers were measured that way, not assumed.
 
@@ -403,6 +404,33 @@ This is the half of the document that matters.
 - `derx parse` of a key usage BIT STRING's bits. openssl's asn1parse prints
   no value for a BIT STRING, so the bit-level decoding is only checked through
   `derx cert` and `openssl x509 -ext keyUsage`.
+
+### Where openssl and GnuTLS disagree
+
+openssl is the only oracle here, and two places on this machine show what
+that costs. Both were found through `certlint`, a sibling repository that
+runs OpenSSL and GnuTLS against each other, and both were re-measured here
+rather than quoted.
+
+A version 1 certificate carrying an extension. RFC 5280 4.1.2.1 requires
+version 3 for extensions. `openssl x509 -text` reads the file and prints
+`Version: 1 (0x0)` with the key usage underneath it; `certtool
+--certificate-info` refuses the whole file with `import error: Error in the
+certificate`; `certlint` refuses it at its parser. `derx` reads it and prints
+`version=1` with the extension, so it is doing what its oracle does. There is
+a hand-built fixture for it and three assertions on it, all of them against
+openssl, which is the honest limit of what this suite can say.
+
+The bit length of a P-521 key. openssl prints `Public-Key: (521 bit)`.
+certtool prints `Algorithm Security Level: Future (528 bits)`, which is 66
+bytes rounded up to a byte boundary and is also a differently named quantity.
+`derx` prints `keybits=521` because openssl's line is what it is compared
+against.
+
+Neither is settled here. A reader with one oracle cannot say which of two
+oracles is right, and picking the one that makes `derx` look correct would be
+choosing the answer first. What `derx` can say is which program it agrees
+with, and it says so.
 
 ### What derx refuses that openssl accepts
 
@@ -613,7 +641,7 @@ in the code. Ten of this one's were:
 9. The fix to item 7 had no gate, so it could be undone silently. `slurp()`
    was corrected on 18 October and the correction was written up here and in
    `PLAN.md`, and nothing has checked it since. Removing the `realloc` leaves
-   the whole suite reporting `333 passed, 0 failed`, under the sanitizers as
+   the whole suite reporting `336 passed, 0 failed`, under the sanitizers as
    well as without them. `make overread` is the only thing that notices, and
    it is a dependency of `make test` rather than a target somebody has to
    remember, because two repositories in this collection had the target and
@@ -667,7 +695,7 @@ somewhere else. The old numbers are worth writing down beside them:
 | `keyUsage` removed from the harness's extension list | `330 agree, 6 declined`, group passed | the list's length is 5, not 6 |
 | the `ext-ku` fixture removed, which is the only `extendedKeyUsage` input anywhere | 477 agree, 6 declined, nothing failed | `extendedKeyUsage: 0 fixture agreements, expected exactly 1` |
 | `subjectKeyIdentifier` stops being decoded | 16 fixtures failed | also the floor, the ceiling and the fixture count |
-| the `realloc` down to the exact file size removed from `slurp()` | `333 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
+| the `realloc` down to the exact file size removed from `slurp()` | `336 passed, 0 failed`, with the sanitizers on | `make overread` fails, `exit 0, no heap-buffer-overflow reported` |
 
 The fourth row found a defect in the replacement rather than in `derx`. Once
 the thresholds moved out of the aggregate assertion it was left printing
@@ -760,7 +788,7 @@ project rests on disconnected.
 | `sweep()`'s threshold raised from 2 to 200 | the probe against a stub that exits 86, which is what a sanitizer abort exits |
 | `sweep()`'s empty-directory check deleted | the probe over an empty directory |
 | `certexts()`'s no-extension-compared check deleted | the probe over the hand-built v1, which carries no extension |
-| section 8 deleted, the fourteen BER cases openssl accepts | `317 assertions above this line, expected 331` |
+| section 8 deleted, the fourteen BER cases openssl accepts | `317 assertions above this line, expected 331`, measured when the literal was 331 |
 | the oracle call in `agree()` replaced by `true` | not one assertion but 163, from the branch that refuses to compare against an oracle that printed nothing |
 | `certfields()`'s nine-field-lines check deleted | not one but 39, from the field diff itself |
 

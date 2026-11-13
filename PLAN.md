@@ -130,6 +130,15 @@ read, because everything downstream of it believes it.
 Nothing in `t/run.sh` checks `derx` against `derx`, and a missing `openssl`
 exits 2 instead of reporting skips: with no oracle there is no pass to report.
 
+GnuTLS `certtool` is not an oracle here, and two places where it reads the
+same bytes differently are recorded in the README rather than settled: a
+version 1 certificate carrying an extension, which openssl reads and
+certtool refuses to import, and the bit length of a P-521 key, which openssl
+gives as 521 and certtool as 528. `derx` follows openssl in both, because
+openssl is this project's declared authority. That is a fact about this
+repository, not evidence about which reading is right, and a suite with one
+oracle cannot make it one.
+
 ## Non-goals
 
 - Cryptography. No signature verification, no hashing, no key operations.
